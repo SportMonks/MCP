@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__sportmonks-football__search",
+      "mcp__sportmonks-football__get_entity",
+      "mcp__sportmonks-football__get_matches",
+      "mcp__sportmonks-football__get_match_preview",
+      "mcp__sportmonks-football__get_standings"
+    ]
+  }
+}

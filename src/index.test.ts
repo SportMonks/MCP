@@ -1,182 +1,153 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-// Must run before any module evaluation (vi.hoisted is lifted above imports)
 vi.hoisted(() => {
-  process.env.ODDS_API_KEY = "test-api-key";
+  process.env.SPORTMONKS_API_TOKEN = "test-api-token";
+  process.env.VITEST = "true";
 });
 
-// Mock the MCP SDK so module-level server setup doesn't fail
 vi.mock("@modelcontextprotocol/sdk/server/index.js", () => {
   class MockServer {
     setRequestHandler = vi.fn();
     connect = vi.fn();
   }
+
   return { Server: MockServer };
 });
+
 vi.mock("@modelcontextprotocol/sdk/server/stdio.js", () => {
   class MockTransport {}
+
   return { StdioServerTransport: MockTransport };
 });
+
 vi.mock("@modelcontextprotocol/sdk/types.js", () => ({
   CallToolRequestSchema: Symbol("CallToolRequestSchema"),
   ListToolsRequestSchema: Symbol("ListToolsRequestSchema"),
   ListResourcesRequestSchema: Symbol("ListResourcesRequestSchema"),
   ReadResourceRequestSchema: Symbol("ReadResourceRequestSchema"),
+  ListPromptsRequestSchema: Symbol("ListPromptsRequestSchema"),
+  GetPromptRequestSchema: Symbol("GetPromptRequestSchema"),
 }));
 
-import { tools, toolMap, apiRequest, jsonResponse, textResponse, errorResponse } from "./index.js";
+import {
+  DOCUMENTATION_RESOURCE_TEXT,
+  FOOTBALL_API_BASE_URL,
+  MAX_MATCH_RESULTS,
+  MAX_SEARCH_RESULTS,
+  apiRequest,
+  errorResponse,
+  getPrompt,
+  initializeReferenceData,
+  jsonResponse,
+  primeReferenceData,
+  promptMap,
+  prompts,
+  readResource,
+  resources,
+  textResponse,
+  toolMap,
+  tools,
+} from "./index.js";
 
-// ── Test Helpers ─────────────────────────────────────────────────────────────
+function mockFetchJson(...responses: Array<{ data: unknown; status?: number; [key: string]: unknown }>) {
+  return vi.fn().mockImplementation(async () => {
+    const nextResponse = responses.shift();
+    if (!nextResponse) {
+      throw new Error("No more mocked responses available");
+    }
 
-function mockFetchJson(data: unknown, status = 200) {
-  return vi.fn().mockResolvedValue({
-    ok: status >= 200 && status < 300,
-    status,
-    json: () => Promise.resolve(data),
-    text: () => Promise.resolve(JSON.stringify(data)),
+    const status = nextResponse.status ?? 200;
+
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      json: () => Promise.resolve(nextResponse.data),
+      text: () => Promise.resolve(JSON.stringify(nextResponse.data)),
+    };
   });
 }
 
-function mockFetchText(text: string, status = 200) {
-  return vi.fn().mockResolvedValue({
-    ok: status >= 200 && status < 300,
-    status,
-    text: () => Promise.resolve(text),
-  });
+function parseToolJson(result: { content: Array<{ text: string }> }) {
+  return JSON.parse(result.content[0].text);
 }
 
-// ── Tool Registry ────────────────────────────────────────────────────────────
+function primeDefaultReferenceData() {
+  primeReferenceData(
+    [
+      { id: 129, code: "overall-matches-played", developer_name: "overall-matches-played" },
+      { id: 130, code: "overall-won", developer_name: "overall-won" },
+      { id: 131, code: "overall-draw", developer_name: "overall-draw" },
+      { id: 132, code: "overall-lost", developer_name: "overall-lost" },
+      { id: 133, code: "overall-goals-for", developer_name: "overall-goals-for" },
+      { id: 134, code: "overall-conceded", developer_name: "overall-conceded" },
+      { id: 179, code: "goal-difference", developer_name: "goal-difference" },
+      { id: 187, code: "overall-points", developer_name: "overall-points" },
+    ],
+    [
+      { id: 1, state: "NS", short_name: "NS", developer_name: "NOT_STARTED", name: "Not Started" },
+      { id: 2, state: "LIVE", short_name: "LIVE", developer_name: "INPLAY", name: "In Play" },
+    ],
+  );
+}
+
+beforeEach(() => {
+  primeDefaultReferenceData();
+});
 
 describe("Tool Registry", () => {
-  const EXPECTED_TOOLS = [
-    "get_sports",
-    "get_bookmakers",
-    "get_selected_bookmakers",
-    "select_bookmakers",
-    "clear_selected_bookmakers",
-    "get_leagues",
-    "get_events",
-    "get_event",
-    "get_live_events",
-    "search_events",
-    "get_odds",
-    "get_multi_odds",
-    "get_odds_movements",
-    "get_updated_odds",
-    "get_historical_events",
-    "get_historical_odds",
-    "get_value_bets",
-    "get_arbitrage_bets",
-    "get_participants",
-    "get_participant",
-    "get_documentation",
+  const expectedTools = [
+    "search",
+    "get_entity",
+    "get_matches",
+    "get_match_preview",
+    "get_standings",
   ];
 
-  it("has all 21 tools registered", () => {
-    expect(tools).toHaveLength(21);
+  it("registers only the five requested tools", () => {
+    expect(tools).toHaveLength(5);
+    expect(tools.map((tool) => tool.name)).toEqual(expectedTools);
   });
 
-  it("has no duplicate tool names", () => {
-    const names = tools.map((t) => t.name);
-    expect(new Set(names).size).toBe(names.length);
-  });
+  it("uses typed input schemas and the expected required fields", () => {
+    expect(toolMap.get("search")?.inputSchema.required).toEqual(["query"]);
+    expect(toolMap.get("get_entity")?.inputSchema.required).toEqual(["id", "type"]);
+    expect(toolMap.get("get_matches")?.inputSchema.required).toEqual(["id", "type"]);
+    expect(toolMap.get("get_match_preview")?.inputSchema.required).toEqual(["id"]);
+    expect(toolMap.get("get_standings")?.inputSchema.required).toEqual(["id"]);
 
-  it.each(EXPECTED_TOOLS)("includes tool: %s", (name) => {
-    expect(toolMap.has(name)).toBe(true);
-  });
-
-  it("every tool has a non-empty description", () => {
-    for (const tool of tools) {
-      expect(tool.description.length).toBeGreaterThan(0);
-    }
-  });
-
-  it("every tool has a valid inputSchema", () => {
-    for (const tool of tools) {
-      expect(tool.inputSchema.type).toBe("object");
-      expect(tool.inputSchema).toHaveProperty("properties");
-      expect(tool.inputSchema).toHaveProperty("required");
-      expect(Array.isArray(tool.inputSchema.required)).toBe(true);
-    }
-  });
-
-  it("every required field exists in properties", () => {
-    for (const tool of tools) {
-      for (const field of tool.inputSchema.required) {
-        expect(tool.inputSchema.properties).toHaveProperty(field);
-      }
-    }
-  });
-
-  it("toolMap provides O(1) lookup for all tools", () => {
-    expect(toolMap.size).toBe(tools.length);
-    for (const tool of tools) {
-      expect(toolMap.get(tool.name)).toBe(tool);
-    }
+    expect(toolMap.get("get_entity")?.inputSchema.properties.id).toMatchObject({ type: "integer" });
+    expect(toolMap.get("get_matches")?.inputSchema.properties.id).toMatchObject({ type: "integer" });
+    expect(toolMap.get("get_match_preview")?.inputSchema.properties.id).toMatchObject({
+      type: "integer",
+    });
+    expect(toolMap.get("get_standings")?.inputSchema.properties.id).toMatchObject({
+      type: "integer",
+    });
   });
 });
-
-// ── Required Parameters ──────────────────────────────────────────────────────
-
-describe("Tool Schemas - Required Parameters", () => {
-  const cases: Array<[string, string[]]> = [
-    ["get_sports", []],
-    ["get_bookmakers", []],
-    ["get_selected_bookmakers", []],
-    ["select_bookmakers", ["bookmakers"]],
-    ["clear_selected_bookmakers", []],
-    ["get_leagues", ["sport"]],
-    ["get_events", ["sport"]],
-    ["get_event", ["id"]],
-    ["get_live_events", []],
-    ["search_events", ["query"]],
-    ["get_odds", ["eventId", "bookmakers"]],
-    ["get_multi_odds", ["eventIds", "bookmakers"]],
-    ["get_odds_movements", ["eventId", "bookmaker", "market"]],
-    ["get_updated_odds", ["since", "bookmaker", "sport"]],
-    ["get_historical_events", ["sport", "league", "from", "to"]],
-    ["get_historical_odds", ["eventId", "bookmakers"]],
-    ["get_value_bets", ["bookmaker"]],
-    ["get_arbitrage_bets", ["bookmakers"]],
-    ["get_participants", ["sport"]],
-    ["get_participant", ["id"]],
-    ["get_documentation", []],
-  ];
-
-  it.each(cases)("%s requires %j", (name, required) => {
-    const tool = toolMap.get(name)!;
-    expect(tool.inputSchema.required).toEqual(required);
-  });
-});
-
-// ── Response Helpers ─────────────────────────────────────────────────────────
 
 describe("Response Helpers", () => {
-  it("jsonResponse wraps data as pretty-printed JSON text", () => {
-    const result = jsonResponse({ foo: "bar" });
-    expect(result.content).toHaveLength(1);
-    expect(result.content[0].type).toBe("text");
-    expect(JSON.parse(result.content[0].text)).toEqual({ foo: "bar" });
-    expect(result.content[0].text).toContain("\n"); // pretty-printed
+  it("jsonResponse returns structured JSON text", () => {
+    const result = jsonResponse({ hello: "world" });
+    expect(parseToolJson(result)).toEqual({ hello: "world" });
   });
 
-  it("textResponse wraps raw text", () => {
-    const result = textResponse("hello world");
-    expect(result.content).toHaveLength(1);
-    expect(result.content[0].type).toBe("text");
-    expect(result.content[0].text).toBe("hello world");
+  it("textResponse returns plain text content", () => {
+    expect(textResponse("hello").content[0].text).toBe("hello");
   });
 
-  it("errorResponse includes isError flag", () => {
-    const result = errorResponse("something broke");
-    expect(result.content[0].text).toBe("Error: something broke");
+  it("errorResponse returns structured JSON errors", () => {
+    const result = errorResponse(new Error("boom"));
+    const parsed = parseToolJson(result);
+
     expect(result.isError).toBe(true);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error.message).toBe("boom");
+    expect(parsed.error.how_to_fix).toContain("Retry");
   });
 });
 
-// ── API Client ───────────────────────────────────────────────────────────────
-
-describe("apiRequest", () => {
+describe("Reference Data", () => {
   let originalFetch: typeof globalThis.fetch;
 
   beforeEach(() => {
@@ -187,87 +158,94 @@ describe("apiRequest", () => {
     globalThis.fetch = originalFetch;
   });
 
-  it("builds URL with endpoint and API key", async () => {
-    const fetchMock = mockFetchJson({ ok: true });
+  it("loads types from core and states from football on initialization", async () => {
+    primeReferenceData([], []);
+
+    const fetchMock = mockFetchJson(
+      {
+        data: [{ id: 129, code: "overall-matches-played", developer_name: "overall-matches-played" }],
+        pagination: { has_more: false },
+      },
+      {
+        data: [{ id: 1, state: "NS", short_name: "NS", developer_name: "NOT_STARTED" }],
+        pagination: { has_more: false },
+      },
+    );
     globalThis.fetch = fetchMock;
 
-    await apiRequest("/sports");
+    await initializeReferenceData();
 
-    const calledUrl = new URL(fetchMock.mock.calls[0][0]);
-    expect(calledUrl.pathname).toBe("/v3/sports");
-    expect(calledUrl.searchParams.get("apiKey")).toBe("test-api-key");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const firstUrl = new URL(fetchMock.mock.calls[0][0]);
+    const secondUrl = new URL(fetchMock.mock.calls[1][0]);
+
+    expect(firstUrl.origin + firstUrl.pathname).toBe("https://api.sportmonks.com/v3/core/types");
+    expect(secondUrl.origin + secondUrl.pathname).toBe(`${FOOTBALL_API_BASE_URL}/states`);
+    expect(firstUrl.searchParams.get("per_page")).toBe("50");
+    expect(firstUrl.searchParams.get("order")).toBe("asc");
+    expect(secondUrl.searchParams.get("per_page")).toBe("50");
+    expect(secondUrl.searchParams.get("order")).toBe("asc");
   });
-
-  it("appends query params to URL", async () => {
-    const fetchMock = mockFetchJson([]);
-    globalThis.fetch = fetchMock;
-
-    await apiRequest("/events", { sport: "football", league: "epl" });
-
-    const calledUrl = new URL(fetchMock.mock.calls[0][0]);
-    expect(calledUrl.searchParams.get("sport")).toBe("football");
-    expect(calledUrl.searchParams.get("league")).toBe("epl");
-  });
-
-  it("filters out undefined params", async () => {
-    const fetchMock = mockFetchJson([]);
-    globalThis.fetch = fetchMock;
-
-    await apiRequest("/events", { sport: "football", league: undefined });
-
-    const calledUrl = new URL(fetchMock.mock.calls[0][0]);
-    expect(calledUrl.searchParams.get("sport")).toBe("football");
-    expect(calledUrl.searchParams.has("league")).toBe(false);
-  });
-
-  it("converts numeric params to strings", async () => {
-    const fetchMock = mockFetchJson([]);
-    globalThis.fetch = fetchMock;
-
-    await apiRequest("/events", { sport: "football", limit: 10, skip: 0 });
-
-    const calledUrl = new URL(fetchMock.mock.calls[0][0]);
-    expect(calledUrl.searchParams.get("limit")).toBe("10");
-    expect(calledUrl.searchParams.get("skip")).toBe("0");
-  });
-
-  it("converts boolean true to string", async () => {
-    const fetchMock = mockFetchJson([]);
-    globalThis.fetch = fetchMock;
-
-    await apiRequest("/leagues", { sport: "football", all: true });
-
-    const calledUrl = new URL(fetchMock.mock.calls[0][0]);
-    expect(calledUrl.searchParams.get("all")).toBe("true");
-  });
-
-  it("uses GET method by default", async () => {
-    const fetchMock = mockFetchJson({});
-    globalThis.fetch = fetchMock;
-
-    await apiRequest("/sports");
-
-    expect(fetchMock.mock.calls[0][1]).toEqual({ method: "GET" });
-  });
-
-  it("supports PUT method", async () => {
-    const fetchMock = mockFetchJson({});
-    globalThis.fetch = fetchMock;
-
-    await apiRequest("/bookmakers/selected/clear", {}, "PUT");
-
-    expect(fetchMock.mock.calls[0][1]).toEqual({ method: "PUT" });
-  });
-
-  it("throws on non-OK response", async () => {
-    globalThis.fetch = mockFetchJson({ error: "not found" }, 404);
-
-    await expect(apiRequest("/events/999999")).rejects.toThrow("API error 404");
-  });
-
 });
 
-// ── Tool Handlers ────────────────────────────────────────────────────────────
+describe("apiRequest", () => {
+  let originalFetch: typeof globalThis.fetch;
+  let originalToken: string | undefined;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+    originalToken = process.env.SPORTMONKS_API_TOKEN;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    process.env.SPORTMONKS_API_TOKEN = originalToken;
+  });
+
+  it("uses football api base url and api_token auth", async () => {
+    const fetchMock = mockFetchJson({ data: [] });
+    globalThis.fetch = fetchMock;
+
+    await apiRequest("/teams/14", { include: "country" });
+
+    const calledUrl = new URL(fetchMock.mock.calls[0][0]);
+    expect(calledUrl.origin + calledUrl.pathname).toBe(`${FOOTBALL_API_BASE_URL}/teams/14`);
+    expect(calledUrl.searchParams.get("api_token")).toBe("test-api-token");
+    expect(calledUrl.searchParams.get("include")).toBe("country");
+  });
+
+  it("throws a descriptive auth error when the token is missing", async () => {
+    process.env.SPORTMONKS_API_TOKEN = "";
+    globalThis.fetch = mockFetchJson({ data: [] });
+
+    await expect(apiRequest("/teams/14")).rejects.toThrow("SPORTMONKS_API_TOKEN is not set");
+  });
+
+  it("throws descriptive upstream errors", async () => {
+    globalThis.fetch = mockFetchJson({ data: { error: "forbidden" }, status: 403 });
+
+    await expect(apiRequest("/teams/14")).rejects.toThrow("Sportmonks rejected the request");
+  });
+
+  it("throws a timeout error when the request takes too long", async () => {
+    vi.useFakeTimers();
+
+    globalThis.fetch = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          reject(new DOMException("The operation was aborted.", "AbortError"));
+        });
+      });
+    });
+
+    const pending = apiRequest("/teams/14");
+    vi.advanceTimersByTime(20_000);
+    await expect(pending).rejects.toThrow("did not respond within");
+
+    vi.useRealTimers();
+  });
+});
 
 describe("Tool Handlers", () => {
   let originalFetch: typeof globalThis.fetch;
@@ -278,230 +256,446 @@ describe("Tool Handlers", () => {
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
+    vi.useRealTimers();
   });
 
-  it("get_sports calls /sports", async () => {
-    const mockData = [{ name: "Football", slug: "football" }];
-    const fetchMock = mockFetchJson(mockData);
-    globalThis.fetch = fetchMock;
+  it("search defaults to all entity types and caps results at 10", async () => {
+    globalThis.fetch = mockFetchJson(
+      {
+        data: [{ id: 2, name: "Zed Player" }],
+      },
+      {
+        data: [{ id: 3, name: "Arsenal" }],
+      },
+      {
+        data: [{ id: 1, name: "Premier League" }],
+      },
+    );
 
-    const result = await toolMap.get("get_sports")!.handler({});
+    const result = await toolMap.get("search")!.handler({ query: "ars" });
+    const parsed = parseToolJson(result);
 
-    const calledUrl = new URL(fetchMock.mock.calls[0][0]);
-    expect(calledUrl.pathname).toBe("/v3/sports");
-    expect(JSON.parse(result.content[0].text)).toEqual(mockData);
+    expect(parsed).toEqual([
+      { id: 3, entity_type: "team", name: "Arsenal" },
+      { id: 1, entity_type: "league", name: "Premier League" },
+      { id: 2, entity_type: "player", name: "Zed Player" },
+    ]);
+
+    expect(globalThis.fetch).toHaveBeenCalledTimes(3);
+
+    const firstUrl = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
+    expect(firstUrl.pathname).toBe("/v3/football/players/search/ars");
+    expect(firstUrl.searchParams.get("per_page")).toBe(String(MAX_SEARCH_RESULTS));
   });
 
-  it("get_events passes all optional params", async () => {
-    const fetchMock = mockFetchJson([]);
-    globalThis.fetch = fetchMock;
-
-    await toolMap.get("get_events")!.handler({
-      sport: "football",
-      league: "england-premier-league",
-      participantId: 38,
-      status: "pending,live",
-      from: "2025-01-01T00:00:00Z",
-      to: "2025-01-31T23:59:59Z",
-      bookmaker: "Bet365",
-      limit: 20,
-      skip: 10,
+  it("search uses a single exact endpoint when a specific type is provided", async () => {
+    globalThis.fetch = mockFetchJson({
+      data: [{ id: 14, name: "Arsenal" }],
     });
 
-    const calledUrl = new URL(fetchMock.mock.calls[0][0]);
-    expect(calledUrl.searchParams.get("sport")).toBe("football");
-    expect(calledUrl.searchParams.get("league")).toBe("england-premier-league");
-    expect(calledUrl.searchParams.get("participantId")).toBe("38");
-    expect(calledUrl.searchParams.get("status")).toBe("pending,live");
-    expect(calledUrl.searchParams.get("from")).toBe("2025-01-01T00:00:00Z");
-    expect(calledUrl.searchParams.get("to")).toBe("2025-01-31T23:59:59Z");
-    expect(calledUrl.searchParams.get("bookmaker")).toBe("Bet365");
-    expect(calledUrl.searchParams.get("limit")).toBe("20");
-    expect(calledUrl.searchParams.get("skip")).toBe("10");
+    const result = await toolMap.get("search")!.handler({ query: "Arsenal", type: "team" });
+    const parsed = parseToolJson(result);
+
+    expect(parsed).toEqual([{ id: 14, entity_type: "team", name: "Arsenal" }]);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+
+    const calledUrl = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
+    expect(calledUrl.pathname).toBe("/v3/football/teams/search/Arsenal");
   });
 
-  it("get_events omits undefined optional params", async () => {
-    const fetchMock = mockFetchJson([]);
-    globalThis.fetch = fetchMock;
+  it("get_entity returns the requested player summary using the two-step player and team lookup", async () => {
+    globalThis.fetch = mockFetchJson(
+      {
+        data: [
+          {
+            id: 758,
+            display_name: "James Tavernier",
+            date_of_birth: "1991-10-31",
+            position: { name: "Right Back" },
+            nationality: { name: "England" },
+            teams: [{ id: 62, type: "domestic" }],
+          },
+        ],
+      },
+      {
+        data: {
+          id: 62,
+          name: "Rangers",
+        },
+      },
+    );
 
-    await toolMap.get("get_events")!.handler({ sport: "football" });
+    const result = await toolMap.get("get_entity")!.handler({ id: 758, type: "player" });
+    const parsed = parseToolJson(result);
 
-    const calledUrl = new URL(fetchMock.mock.calls[0][0]);
-    expect(calledUrl.searchParams.get("sport")).toBe("football");
-    expect(calledUrl.searchParams.has("league")).toBe(false);
-    expect(calledUrl.searchParams.has("participantId")).toBe(false);
-    expect(calledUrl.searchParams.has("limit")).toBe(false);
-  });
-
-  it("get_event uses path parameter", async () => {
-    const fetchMock = mockFetchJson({ id: 12345 });
-    globalThis.fetch = fetchMock;
-
-    await toolMap.get("get_event")!.handler({ id: 12345 });
-
-    const calledUrl = new URL(fetchMock.mock.calls[0][0]);
-    expect(calledUrl.pathname).toBe("/v3/events/12345");
-  });
-
-  it("get_participant uses path parameter", async () => {
-    const fetchMock = mockFetchJson({ id: 38, name: "Chelsea" });
-    globalThis.fetch = fetchMock;
-
-    await toolMap.get("get_participant")!.handler({ id: 38 });
-
-    const calledUrl = new URL(fetchMock.mock.calls[0][0]);
-    expect(calledUrl.pathname).toBe("/v3/participants/38");
-  });
-
-  it("get_leagues passes all param when true", async () => {
-    const fetchMock = mockFetchJson([]);
-    globalThis.fetch = fetchMock;
-
-    await toolMap.get("get_leagues")!.handler({ sport: "football", all: true });
-
-    const calledUrl = new URL(fetchMock.mock.calls[0][0]);
-    expect(calledUrl.searchParams.get("all")).toBe("true");
-  });
-
-  it("get_leagues omits all param when false", async () => {
-    const fetchMock = mockFetchJson([]);
-    globalThis.fetch = fetchMock;
-
-    await toolMap.get("get_leagues")!.handler({ sport: "football", all: false });
-
-    const calledUrl = new URL(fetchMock.mock.calls[0][0]);
-    expect(calledUrl.searchParams.has("all")).toBe(false);
-  });
-
-  it("get_value_bets sends includeEventDetails only when true", async () => {
-    const fetchMock = mockFetchJson([]);
-    globalThis.fetch = fetchMock;
-
-    await toolMap.get("get_value_bets")!.handler({ bookmaker: "Bet365", includeEventDetails: true });
-    const url1 = new URL(fetchMock.mock.calls[0][0]);
-    expect(url1.searchParams.get("includeEventDetails")).toBe("true");
-
-    await toolMap.get("get_value_bets")!.handler({ bookmaker: "Bet365", includeEventDetails: false });
-    const url2 = new URL(fetchMock.mock.calls[1][0]);
-    expect(url2.searchParams.has("includeEventDetails")).toBe(false);
-
-    await toolMap.get("get_value_bets")!.handler({ bookmaker: "Bet365" });
-    const url3 = new URL(fetchMock.mock.calls[2][0]);
-    expect(url3.searchParams.has("includeEventDetails")).toBe(false);
-  });
-
-  it("get_arbitrage_bets sends includeEventDetails only when true", async () => {
-    const fetchMock = mockFetchJson([]);
-    globalThis.fetch = fetchMock;
-
-    await toolMap.get("get_arbitrage_bets")!.handler({ bookmakers: "Bet365,SingBet", includeEventDetails: true });
-    const url = new URL(fetchMock.mock.calls[0][0]);
-    expect(url.searchParams.get("includeEventDetails")).toBe("true");
-
-    await toolMap.get("get_arbitrage_bets")!.handler({ bookmakers: "Bet365,SingBet" });
-    const url2 = new URL(fetchMock.mock.calls[1][0]);
-    expect(url2.searchParams.has("includeEventDetails")).toBe(false);
-  });
-
-  it("select_bookmakers uses PUT method", async () => {
-    const fetchMock = mockFetchJson({ success: true });
-    globalThis.fetch = fetchMock;
-
-    await toolMap.get("select_bookmakers")!.handler({ bookmakers: "Bet365,SingBet" });
-
-    const calledUrl = new URL(fetchMock.mock.calls[0][0]);
-    expect(calledUrl.pathname).toBe("/v3/bookmakers/selected/select");
-    expect(fetchMock.mock.calls[0][1]).toEqual({ method: "PUT" });
-    expect(calledUrl.searchParams.get("bookmakers")).toBe("Bet365,SingBet");
-  });
-
-  it("clear_selected_bookmakers uses PUT method", async () => {
-    const fetchMock = mockFetchJson({ success: true });
-    globalThis.fetch = fetchMock;
-
-    await toolMap.get("clear_selected_bookmakers")!.handler({});
-
-    const calledUrl = new URL(fetchMock.mock.calls[0][0]);
-    expect(calledUrl.pathname).toBe("/v3/bookmakers/selected/clear");
-    expect(fetchMock.mock.calls[0][1]).toEqual({ method: "PUT" });
-  });
-
-  it("get_odds_movements passes market and optional marketLine", async () => {
-    const fetchMock = mockFetchJson({});
-    globalThis.fetch = fetchMock;
-
-    await toolMap.get("get_odds_movements")!.handler({
-      eventId: "123",
-      bookmaker: "Bet365",
-      market: "Spread",
-      marketLine: "0.5",
+    expect(parsed).toEqual({
+      id: 758,
+      name: "James Tavernier",
+      position: "Right Back",
+      nationality: "England",
+      date_of_birth: "1991-10-31",
+      current_team: { id: 62, name: "Rangers" },
     });
 
-    const calledUrl = new URL(fetchMock.mock.calls[0][0]);
-    expect(calledUrl.pathname).toBe("/v3/odds/movements");
-    expect(calledUrl.searchParams.get("market")).toBe("Spread");
-    expect(calledUrl.searchParams.get("marketLine")).toBe("0.5");
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    const playerUrl = new URL(fetchMock.mock.calls[0][0]);
+    const teamUrl = new URL(fetchMock.mock.calls[1][0]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(playerUrl.pathname).toBe("/v3/football/players/758");
+    expect(playerUrl.searchParams.get("include")).toBe("position;nationality;teams");
+    expect(teamUrl.pathname).toBe("/v3/football/teams/62");
   });
 
-  it("get_updated_odds passes since as number", async () => {
-    const fetchMock = mockFetchJson([]);
-    globalThis.fetch = fetchMock;
-
-    const since = 1700000000;
-    await toolMap.get("get_updated_odds")!.handler({
-      since,
-      bookmaker: "Bet365",
-      sport: "football",
+  it("get_entity returns the requested team summary without league data", async () => {
+    globalThis.fetch = mockFetchJson({
+      data: {
+        id: 14,
+        name: "Arsenal",
+        country: { name: "England" },
+        venue: { name: "Emirates Stadium" },
+      },
     });
 
-    const calledUrl = new URL(fetchMock.mock.calls[0][0]);
-    expect(calledUrl.pathname).toBe("/v3/odds/updated");
-    expect(calledUrl.searchParams.get("since")).toBe(String(since));
-  });
+    const result = await toolMap.get("get_entity")!.handler({ id: 14, type: "team" });
+    const parsed = parseToolJson(result);
 
-  it("get_historical_events passes all required params", async () => {
-    const fetchMock = mockFetchJson([]);
-    globalThis.fetch = fetchMock;
-
-    await toolMap.get("get_historical_events")!.handler({
-      sport: "football",
-      league: "england-premier-league",
-      from: "2026-01-01T00:00:00Z",
-      to: "2026-01-31T23:59:59Z",
+    expect(parsed).toEqual({
+      id: 14,
+      name: "Arsenal",
+      country: "England",
+      venue: "Emirates Stadium",
     });
 
-    const calledUrl = new URL(fetchMock.mock.calls[0][0]);
-    expect(calledUrl.pathname).toBe("/v3/historical/events");
-    expect(calledUrl.searchParams.get("sport")).toBe("football");
-    expect(calledUrl.searchParams.get("league")).toBe("england-premier-league");
-    expect(calledUrl.searchParams.get("from")).toBe("2026-01-01T00:00:00Z");
-    expect(calledUrl.searchParams.get("to")).toBe("2026-01-31T23:59:59Z");
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    const teamUrl = new URL(fetchMock.mock.calls[0][0]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(teamUrl.pathname).toBe("/v3/football/teams/14");
+    expect(teamUrl.searchParams.get("include")).toBe("venue;country");
   });
 
-  it("get_documentation fetches from docs URL and returns text", async () => {
-    const docsText = "# Odds API Documentation\nThis is the docs.";
-    const fetchMock = mockFetchText(docsText);
-    globalThis.fetch = fetchMock;
+  it("get_entity returns the requested league summary", async () => {
+    globalThis.fetch = mockFetchJson({
+      data: {
+        id: 501,
+        name: "Premiership",
+        country: { name: "Scotland" },
+      },
+    });
 
-    const result = await toolMap.get("get_documentation")!.handler({});
+    const result = await toolMap.get("get_entity")!.handler({ id: 501, type: "league" });
+    const parsed = parseToolJson(result);
 
-    const calledUrl = new URL(fetchMock.mock.calls[0][0]);
-    expect(calledUrl.href).toBe("https://docs.odds-api.io/llms-full.txt");
-    expect(result.content[0].text).toBe(docsText);
+    expect(parsed).toEqual({
+      id: 501,
+      name: "Premiership",
+      country: "Scotland",
+    });
+
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    const leagueUrl = new URL(fetchMock.mock.calls[0][0]);
+
+    expect(leagueUrl.pathname).toBe("/v3/football/leagues/501");
+    expect(leagueUrl.searchParams.get("include")).toBe("country");
   });
 
-  it("handler throws on API failure", async () => {
-    globalThis.fetch = mockFetchJson({ error: "bad request" }, 400);
+  it("get_matches uses the exact team date-range endpoint for upcoming team fixtures", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-08T10:00:00"));
 
-    await expect(toolMap.get("get_sports")!.handler({})).rejects.toThrow(
-      "API error 400",
+    globalThis.fetch = mockFetchJson(
+      {
+        data: { id: 14, name: "Arsenal" },
+      },
+      {
+        data: [
+          {
+            id: 1001,
+            starting_at: "2026-04-10 19:00:00",
+            state_id: 1,
+            league: { id: 8, name: "Premier League" },
+            participants: [
+              { id: 14, name: "Arsenal", meta: { location: "home" } },
+              { id: 65, name: "Chelsea", meta: { location: "away" } },
+            ],
+          },
+        ],
+      },
+    );
+
+    const result = await toolMap.get("get_matches")!.handler({ id: 14, type: "team" });
+    const parsed = parseToolJson(result);
+
+    expect(parsed).toEqual([
+      {
+        id: 1001,
+        home_team: "Arsenal",
+        away_team: "Chelsea",
+        starting_at: "2026-04-10 19:00:00",
+        state: "NS",
+        league: { id: 8, name: "Premier League" },
+      },
+    ]);
+
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    const calledUrl = new URL(fetchMock.mock.calls[1][0]);
+
+    expect(calledUrl.pathname).toBe("/v3/football/fixtures/between/2026-04-08/2026-04-22/14");
+    expect(calledUrl.searchParams.get("include")).toBe("participants;league");
+    expect(calledUrl.searchParams.get("per_page")).toBe(String(MAX_MATCH_RESULTS));
+    expect(calledUrl.searchParams.get("order")).toBeNull();
+  });
+
+  it("get_matches uses inplay livescores with the exact league filter for live league matches", async () => {
+    globalThis.fetch = mockFetchJson(
+      {
+        data: { id: 501, name: "Premiership" },
+      },
+      {
+        data: [
+          {
+            id: 2001,
+            starting_at: "2026-04-08 16:00:00",
+            state_id: 2,
+            league: { id: 501, name: "Premiership" },
+            participants: [
+              { id: 53, name: "Celtic", meta: { location: "home" } },
+              { id: 62, name: "Rangers", meta: { location: "away" } },
+            ],
+          },
+        ],
+      },
+    );
+
+    const result = await toolMap.get("get_matches")!.handler({
+      id: 501,
+      type: "league",
+      timeframe: "live",
+    });
+    const parsed = parseToolJson(result);
+
+    expect(parsed).toEqual([
+      {
+        id: 2001,
+        home_team: "Celtic",
+        away_team: "Rangers",
+        starting_at: "2026-04-08 16:00:00",
+        state: "LIVE",
+        league: { id: 501, name: "Premiership" },
+      },
+    ]);
+
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    const calledUrl = new URL(fetchMock.mock.calls[1][0]);
+
+    expect(calledUrl.pathname).toBe("/v3/football/livescores/inplay");
+    expect(calledUrl.searchParams.get("filters")).toBe("fixtureLeagues:501");
+    expect(calledUrl.searchParams.get("include")).toBe("participants;league");
+  });
+
+  it("get_match_preview uses fixture by id plus head-to-head and returns result_info", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-08T10:00:00"));
+
+    globalThis.fetch = mockFetchJson(
+      {
+        data: {
+          id: 18535517,
+          starting_at: "2026-04-09 11:30:00",
+          state_id: 1,
+          participants: [
+            { id: 53, name: "Celtic", meta: { location: "home" } },
+            { id: 62, name: "Rangers", meta: { location: "away" } },
+          ],
+        },
+      },
+      {
+        data: [
+          {
+            id: 999,
+            starting_at: "2026-03-01 12:00:00",
+            result_info: "Celtic won",
+            participants: [
+              { id: 53, name: "Celtic", meta: { location: "home" } },
+              { id: 62, name: "Rangers", meta: { location: "away" } },
+            ],
+            scores: [
+              { participant_id: 53, description: "CURRENT", score: { goals: 2 } },
+              { participant_id: 62, description: "CURRENT", score: { goals: 1 } },
+            ],
+          },
+        ],
+      },
+    );
+
+    const result = await toolMap.get("get_match_preview")!.handler({ id: 18535517 });
+    const parsed = parseToolJson(result);
+
+    expect(parsed).toEqual({
+      id: 18535517,
+      home_team: "Celtic",
+      away_team: "Rangers",
+      starting_at: "2026-04-09 11:30:00",
+      last_5_h2h_matches: [
+        {
+          date: "2026-03-01",
+          home_team: "Celtic",
+          away_team: "Rangers",
+          home_score: 2,
+          away_score: 1,
+          result_info: "Celtic won",
+        },
+      ],
+    });
+
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    const fixtureUrl = new URL(fetchMock.mock.calls[0][0]);
+    const h2hUrl = new URL(fetchMock.mock.calls[1][0]);
+
+    expect(fixtureUrl.pathname).toBe("/v3/football/fixtures/18535517");
+    expect(fixtureUrl.searchParams.get("include")).toBe("participants");
+    expect(h2hUrl.pathname).toBe("/v3/football/fixtures/head-to-head/53/62");
+    expect(h2hUrl.searchParams.get("include")).toBe("participants;scores");
+    expect(h2hUrl.searchParams.get("per_page")).toBe("5");
+  });
+
+  it("get_match_preview rejects fixtures that have already started", async () => {
+    globalThis.fetch = mockFetchJson({
+      data: {
+        id: 18535517,
+        starting_at: "2026-04-09 11:30:00",
+        state_id: 2,
+        participants: [
+          { id: 53, name: "Celtic", meta: { location: "home" } },
+          { id: 62, name: "Rangers", meta: { location: "away" } },
+        ],
+      },
+    });
+
+    await expect(toolMap.get("get_match_preview")!.handler({ id: 18535517 })).rejects.toThrow(
+      "get_match_preview only works for fixtures that have not started yet",
+    );
+
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("get_standings uses live league standings and maps detail types through startup type data", async () => {
+    globalThis.fetch = mockFetchJson(
+      {
+        data: { id: 501, name: "Premiership" },
+      },
+      {
+        data: [
+          {
+            position: 1,
+            points: 80,
+            participant: { id: 53, name: "Celtic" },
+            details: [
+              { type_id: 129, value: 32 },
+              { type_id: 130, value: 26 },
+              { type_id: 131, value: 2 },
+              { type_id: 132, value: 4 },
+              { type_id: 179, value: 45 },
+              { type_id: 187, value: 80 },
+            ],
+          },
+        ],
+      },
+    );
+
+    const result = await toolMap.get("get_standings")!.handler({ id: 501 });
+    const parsed = parseToolJson(result);
+
+    expect(parsed).toEqual([
+      {
+        position: 1,
+        team: { id: 53, name: "Celtic" },
+        played: 32,
+        won: 26,
+        drawn: 2,
+        lost: 4,
+        gd: 45,
+        points: 80,
+      },
+    ]);
+
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    const standingsUrl = new URL(fetchMock.mock.calls[1][0]);
+
+    expect(standingsUrl.pathname).toBe("/v3/football/standings/live/leagues/501");
+    expect(standingsUrl.searchParams.get("include")).toBe("participant;details");
+  });
+});
+
+describe("Validation", () => {
+  it("rejects empty search queries", async () => {
+    await expect(toolMap.get("search")!.handler({ query: "" })).rejects.toThrow(
+      "The 'query' field is required",
+    );
+  });
+
+  it("rejects invalid entity types", async () => {
+    await expect(toolMap.get("get_entity")!.handler({ id: 1, type: "coach" })).rejects.toThrow(
+      "Invalid 'type' value",
+    );
+  });
+
+  it("rejects invalid timeframes", async () => {
+    await expect(
+      toolMap.get("get_matches")!.handler({ id: 14, type: "team", timeframe: "tomorrow" }),
+    ).rejects.toThrow("Invalid 'timeframe' value");
+  });
+
+  it("rejects invalid standings ids", async () => {
+    await expect(toolMap.get("get_standings")!.handler({ id: 0 })).rejects.toThrow(
+      "The 'id' field must be a positive integer",
     );
   });
 });
 
-// ── Edge Cases ───────────────────────────────────────────────────────────────
+describe("Resources", () => {
+  it("lists the documentation resource", () => {
+    expect(resources).toEqual([
+      {
+        uri: "sportmonks://documentation",
+        name: "Sportmonks Football MCP Overview",
+        description: "Overview of the five-tool Sportmonks football MCP server.",
+        mimeType: "text/plain",
+      },
+    ]);
+  });
 
-describe("Edge Cases", () => {
+  it("returns the documentation overview text", async () => {
+    const resource = await readResource("sportmonks://documentation");
+    expect(resource.contents[0].text).toBe(DOCUMENTATION_RESOURCE_TEXT);
+  });
+});
+
+describe("Prompt Registry", () => {
+  it("registers the three prompts", () => {
+    expect(prompts).toHaveLength(3);
+    expect(prompts.map((p) => p.name)).toEqual([
+      "match_preview",
+      "team_overview",
+      "league_overview",
+    ]);
+  });
+
+  it("declares required arguments on each prompt", () => {
+    expect(promptMap.get("match_preview")?.arguments).toEqual([
+      { name: "fixture_id", description: expect.any(String), required: true },
+    ]);
+    expect(promptMap.get("team_overview")?.arguments).toEqual([
+      { name: "team_id", description: expect.any(String), required: true },
+    ]);
+    expect(promptMap.get("league_overview")?.arguments).toEqual([
+      { name: "league_id", description: expect.any(String), required: true },
+    ]);
+  });
+});
+
+describe("Prompt Handlers", () => {
   let originalFetch: typeof globalThis.fetch;
 
   beforeEach(() => {
@@ -510,47 +704,192 @@ describe("Edge Cases", () => {
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
+    vi.useRealTimers();
   });
 
-  it("get_events with skip=0 sends the parameter", async () => {
-    const fetchMock = mockFetchJson([]);
-    globalThis.fetch = fetchMock;
+  it("match_preview returns fixture info and h2h in a user message", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-08T10:00:00"));
 
-    await toolMap.get("get_events")!.handler({ sport: "football", skip: 0 });
+    globalThis.fetch = mockFetchJson(
+      {
+        data: {
+          id: 18535517,
+          starting_at: "2026-04-09 11:30:00",
+          state_id: 1,
+          participants: [
+            { id: 53, name: "Celtic", meta: { location: "home" } },
+            { id: 62, name: "Rangers", meta: { location: "away" } },
+          ],
+        },
+      },
+      {
+        data: [
+          {
+            id: 999,
+            starting_at: "2026-03-01 12:00:00",
+            result_info: "Celtic won",
+            participants: [
+              { id: 53, name: "Celtic", meta: { location: "home" } },
+              { id: 62, name: "Rangers", meta: { location: "away" } },
+            ],
+            scores: [
+              { participant_id: 53, description: "CURRENT", score: { goals: 2 } },
+              { participant_id: 62, description: "CURRENT", score: { goals: 1 } },
+            ],
+          },
+        ],
+      },
+    );
 
-    const calledUrl = new URL(fetchMock.mock.calls[0][0]);
-    expect(calledUrl.searchParams.get("skip")).toBe("0");
+    const result = await getPrompt("match_preview", { fixture_id: "18535517" });
+    const text = result.messages[0].content.text;
+
+    expect(result.messages[0].role).toBe("user");
+    expect(result.description).toContain("Celtic");
+    expect(text).toContain("Do not invent facts");
+    expect(text).toContain("Celtic vs Rangers");
+    expect(text).toContain("2026-04-09 11:30:00");
+    expect(text).toContain("Head-to-Head");
+    expect(text).toContain("2-1");
+    expect(text).toContain("Celtic won");
   });
 
-  it("search_events passes query through", async () => {
-    const fetchMock = mockFetchJson([]);
-    globalThis.fetch = fetchMock;
+  it("team_overview returns entity, matches, and standings in a user message", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-08T10:00:00"));
 
-    await toolMap.get("search_events")!.handler({ query: "Liverpool" });
+    globalThis.fetch = mockFetchJson(
+      // fetchEntity → GET /teams/14
+      {
+        data: {
+          id: 14,
+          name: "Arsenal",
+          country: { name: "England" },
+          venue: { name: "Emirates Stadium" },
+        },
+      },
+      // fetchMatches → entity reference GET /teams/14
+      { data: { id: 14, name: "Arsenal" } },
+      // fetchMatches → GET /fixtures/between/...
+      {
+        data: [
+          {
+            id: 1001,
+            starting_at: "2026-04-10 19:00:00",
+            state_id: 1,
+            league: { id: 8, name: "Premier League" },
+            participants: [
+              { id: 14, name: "Arsenal", meta: { location: "home" } },
+              { id: 65, name: "Chelsea", meta: { location: "away" } },
+            ],
+          },
+        ],
+      },
+      // fetchStandings → entity reference GET /leagues/8
+      { data: { id: 8, name: "Premier League" } },
+      // fetchStandings → GET /standings/live/leagues/8
+      {
+        data: [
+          {
+            position: 1,
+            points: 80,
+            participant: { id: 14, name: "Arsenal" },
+            details: [
+              { type_id: 129, value: 32 },
+              { type_id: 130, value: 26 },
+              { type_id: 131, value: 2 },
+              { type_id: 132, value: 4 },
+              { type_id: 179, value: 45 },
+              { type_id: 187, value: 80 },
+            ],
+          },
+        ],
+      },
+    );
 
-    const calledUrl = new URL(fetchMock.mock.calls[0][0]);
-    expect(calledUrl.searchParams.get("query")).toBe("Liverpool");
+    const result = await getPrompt("team_overview", { team_id: "14" });
+    const text = result.messages[0].content.text;
+
+    expect(result.messages[0].role).toBe("user");
+    expect(result.description).toContain("Arsenal");
+    expect(text).toContain("Do not invent facts");
+    expect(text).toContain("Team: Arsenal");
+    expect(text).toContain("Emirates Stadium");
+    expect(text).toContain("Arsenal vs Chelsea");
+    expect(text).toContain("League Standing");
+    expect(text).toContain("Pts:80");
   });
 
-  it("get_multi_odds passes comma-separated IDs", async () => {
-    const fetchMock = mockFetchJson([]);
-    globalThis.fetch = fetchMock;
+  it("league_overview returns entity, standings, and matches in a user message", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-08T10:00:00"));
 
-    await toolMap.get("get_multi_odds")!.handler({
-      eventIds: "1,2,3",
-      bookmakers: "Bet365,Unibet",
+    globalThis.fetch = vi.fn().mockImplementation(async (url: string) => {
+      const path = new URL(url).pathname;
+      let data: unknown;
+
+      if (path.includes("/standings/live/leagues/")) {
+        data = [
+          {
+            position: 1,
+            points: 80,
+            participant: { id: 53, name: "Celtic" },
+            details: [
+              { type_id: 129, value: 32 },
+              { type_id: 130, value: 26 },
+              { type_id: 131, value: 2 },
+              { type_id: 132, value: 4 },
+              { type_id: 179, value: 45 },
+              { type_id: 187, value: 80 },
+            ],
+          },
+        ];
+      } else if (path.includes("/fixtures/between/")) {
+        data = [
+          {
+            id: 2001,
+            starting_at: "2026-04-10 16:00:00",
+            state_id: 1,
+            league: { id: 501, name: "Premiership" },
+            participants: [
+              { id: 53, name: "Celtic", meta: { location: "home" } },
+              { id: 62, name: "Rangers", meta: { location: "away" } },
+            ],
+          },
+        ];
+      } else {
+        data = { id: 501, name: "Premiership", country: { name: "Scotland" } };
+      }
+
+      return {
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ data }),
+        text: () => Promise.resolve(JSON.stringify({ data })),
+      };
     });
 
-    const calledUrl = new URL(fetchMock.mock.calls[0][0]);
-    expect(calledUrl.searchParams.get("eventIds")).toBe("1,2,3");
-    expect(calledUrl.searchParams.get("bookmakers")).toBe("Bet365,Unibet");
+    const result = await getPrompt("league_overview", { league_id: "501" });
+    const text = result.messages[0].content.text;
+
+    expect(result.messages[0].role).toBe("user");
+    expect(result.description).toContain("Premiership");
+    expect(text).toContain("Do not invent facts");
+    expect(text).toContain("League: Premiership");
+    expect(text).toContain("Scotland");
+    expect(text).toContain("1. Celtic");
+    expect(text).toContain("Pts:80");
+    expect(text).toContain("Celtic vs Rangers");
   });
 
-  it("get_documentation throws on fetch failure", async () => {
-    globalThis.fetch = mockFetchText("", 500);
+  it("rejects unknown prompt names", async () => {
+    await expect(getPrompt("nonexistent", {})).rejects.toThrow("Unknown prompt");
+  });
 
-    await expect(toolMap.get("get_documentation")!.handler({})).rejects.toThrow(
-      "Failed to fetch documentation: 500",
+  it("validates prompt arguments", async () => {
+    await expect(getPrompt("match_preview", { fixture_id: "abc" })).rejects.toThrow(
+      "must be a positive integer",
     );
   });
 });

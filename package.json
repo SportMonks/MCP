@@ -1,41 +1,34 @@
 {
-  "name": "odds-api-mcp-server",
-  "version": "1.1.1",
-  "description": "MCP server for Odds-API.io - Access sports betting odds data from AI tools like Claude, Cursor, and VS Code",
+  "name": "sportmonks-football-mcp-server",
+  "version": "1.1.0",
+  "description": "MCP server for Sportmonks Football API 3.0 with five focused tools for search, entity lookup, matches, match previews, and standings",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "odds-api-mcp-server": "dist/index.js"
+    "sportmonks-football-mcp-server": "dist/index.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "node ./node_modules/typescript/bin/tsc -p tsconfig.build.json",
     "start": "node dist/index.js",
-    "dev": "ts-node src/index.ts",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "dev": "node ./node_modules/ts-node/dist/bin.js src/index.ts",
+    "test": "node ./node_modules/vitest/vitest.mjs run",
+    "test:watch": "node ./node_modules/vitest/vitest.mjs"
   },
   "keywords": [
     "mcp",
     "model-context-protocol",
-    "odds-api",
-    "sports-betting",
-    "odds",
+    "sportmonks",
+    "football",
+    "livescores",
+    "fixtures",
+    "standings",
     "ai",
     "claude",
     "cursor"
   ],
-  "author": "Odds-API.io",
   "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/odds-api-io/odds-api-mcp-server"
-  },
-  "homepage": "https://odds-api.io",
-  "bugs": {
-    "url": "https://github.com/odds-api-io/odds-api-mcp-server/issues"
-  },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^0.5.0"
+    "@modelcontextprotocol/sdk": "^1.29.0"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
