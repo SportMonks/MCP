@@ -74,6 +74,8 @@ function parseToolJson(result: { content: Array<{ text: string }> }) {
 function primeDefaultReferenceData() {
   primeReferenceData(
     [
+      { id: 11, code: "lineup", developer_name: "lineup", name: "Lineup" },
+      { id: 12, code: "bench", developer_name: "bench", name: "Bench" },
       { id: 129, code: "overall-matches-played", developer_name: "overall-matches-played" },
       { id: 130, code: "overall-won", developer_name: "overall-won" },
       { id: 131, code: "overall-draw", developer_name: "overall-draw" },
@@ -82,6 +84,12 @@ function primeDefaultReferenceData() {
       { id: 134, code: "overall-conceded", developer_name: "overall-conceded" },
       { id: 179, code: "goal-difference", developer_name: "goal-difference" },
       { id: 187, code: "overall-points", developer_name: "overall-points" },
+      { id: 208, code: "goal-topscorer", developer_name: "GOAL_TOPSCORER", model_type: "statistic", name: "Goal Topscorer" },
+      { id: 209, code: "assist-topscorer", developer_name: "ASSIST_TOPSCORER", model_type: "statistic", name: "Assist Topscorer" },
+      { id: 84, code: "yellowcards", developer_name: "YELLOWCARDS", model_type: "statistic", name: "Yellowcards" },
+      { id: 301, code: "goal", developer_name: "goal", name: "Goal" },
+      { id: 401, code: "possession", developer_name: "possession", name: "Possession" },
+      { id: 402, code: "corners", developer_name: "corners", name: "Corners" },
     ],
     [
       { id: 1, state: "NS", short_name: "NS", developer_name: "NOT_STARTED", name: "Not Started" },
@@ -97,30 +105,54 @@ beforeEach(() => {
 describe("Tool Registry", () => {
   const expectedTools = [
     "search",
-    "get_entity",
+    "get_player",
+    "get_team",
+    "get_league",
+    "get_squad",
     "get_matches",
     "get_match_preview",
+    "get_fixture_details",
     "get_standings",
+    "get_historic_seasons",
+    "get_topscorers",
   ];
 
-  it("registers only the five requested tools", () => {
-    expect(tools).toHaveLength(5);
+  it("registers the split player, team, and league tools without the old get_entity tool", () => {
+    expect(tools).toHaveLength(11);
     expect(tools.map((tool) => tool.name)).toEqual(expectedTools);
   });
 
   it("uses typed input schemas and the expected required fields", () => {
     expect(toolMap.get("search")?.inputSchema.required).toEqual(["query"]);
-    expect(toolMap.get("get_entity")?.inputSchema.required).toEqual(["id", "type"]);
+    expect(toolMap.get("get_player")?.inputSchema.required).toEqual(["id"]);
+    expect(toolMap.get("get_team")?.inputSchema.required).toEqual(["id"]);
+    expect(toolMap.get("get_league")?.inputSchema.required).toEqual(["id"]);
+    expect(toolMap.get("get_squad")?.inputSchema.required).toEqual(["team_id"]);
     expect(toolMap.get("get_matches")?.inputSchema.required).toEqual(["id", "type"]);
     expect(toolMap.get("get_match_preview")?.inputSchema.required).toEqual(["id"]);
+    expect(toolMap.get("get_fixture_details")?.inputSchema.required).toEqual(["fixture_id"]);
     expect(toolMap.get("get_standings")?.inputSchema.required).toEqual(["id"]);
+    expect(toolMap.get("get_historic_seasons")?.inputSchema.required).toEqual(["league_id"]);
+    expect(toolMap.get("get_topscorers")?.inputSchema.required).toEqual(["season_id", "type"]);
 
-    expect(toolMap.get("get_entity")?.inputSchema.properties.id).toMatchObject({ type: "integer" });
+    expect(toolMap.get("get_player")?.inputSchema.properties.id).toMatchObject({ type: "integer" });
+    expect(toolMap.get("get_team")?.inputSchema.properties.id).toMatchObject({ type: "integer" });
+    expect(toolMap.get("get_league")?.inputSchema.properties.id).toMatchObject({ type: "integer" });
+    expect(toolMap.get("get_squad")?.inputSchema.properties.team_id).toMatchObject({ type: "integer" });
     expect(toolMap.get("get_matches")?.inputSchema.properties.id).toMatchObject({ type: "integer" });
     expect(toolMap.get("get_match_preview")?.inputSchema.properties.id).toMatchObject({
       type: "integer",
     });
+    expect(toolMap.get("get_fixture_details")?.inputSchema.properties.fixture_id).toMatchObject({
+      type: "integer",
+    });
     expect(toolMap.get("get_standings")?.inputSchema.properties.id).toMatchObject({
+      type: "integer",
+    });
+    expect(toolMap.get("get_historic_seasons")?.inputSchema.properties.league_id).toMatchObject({
+      type: "integer",
+    });
+    expect(toolMap.get("get_topscorers")?.inputSchema.properties.season_id).toMatchObject({
       type: "integer",
     });
   });
@@ -303,7 +335,7 @@ describe("Tool Handlers", () => {
     expect(calledUrl.pathname).toBe("/v3/football/teams/search/Arsenal");
   });
 
-  it("get_entity returns the requested player summary using the two-step player and team lookup", async () => {
+  it("get_player delegates to the exact player entity flow", async () => {
     globalThis.fetch = mockFetchJson(
       {
         data: [
@@ -325,7 +357,7 @@ describe("Tool Handlers", () => {
       },
     );
 
-    const result = await toolMap.get("get_entity")!.handler({ id: 758, type: "player" });
+    const result = await toolMap.get("get_player")!.handler({ id: 758 });
     const parsed = parseToolJson(result);
 
     expect(parsed).toEqual({
@@ -336,18 +368,9 @@ describe("Tool Handlers", () => {
       date_of_birth: "1991-10-31",
       current_team: { id: 62, name: "Rangers" },
     });
-
-    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
-    const playerUrl = new URL(fetchMock.mock.calls[0][0]);
-    const teamUrl = new URL(fetchMock.mock.calls[1][0]);
-
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(playerUrl.pathname).toBe("/v3/football/players/758");
-    expect(playerUrl.searchParams.get("include")).toBe("position;nationality;teams");
-    expect(teamUrl.pathname).toBe("/v3/football/teams/62");
   });
 
-  it("get_entity returns the requested team summary without league data", async () => {
+  it("get_team uses the exact team endpoint and output shape", async () => {
     globalThis.fetch = mockFetchJson({
       data: {
         id: 14,
@@ -357,7 +380,7 @@ describe("Tool Handlers", () => {
       },
     });
 
-    const result = await toolMap.get("get_entity")!.handler({ id: 14, type: "team" });
+    const result = await toolMap.get("get_team")!.handler({ id: 14 });
     const parsed = parseToolJson(result);
 
     expect(parsed).toEqual({
@@ -367,15 +390,12 @@ describe("Tool Handlers", () => {
       venue: "Emirates Stadium",
     });
 
-    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
-    const teamUrl = new URL(fetchMock.mock.calls[0][0]);
-
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(teamUrl.pathname).toBe("/v3/football/teams/14");
-    expect(teamUrl.searchParams.get("include")).toBe("venue;country");
+    const calledUrl = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
+    expect(calledUrl.pathname).toBe("/v3/football/teams/14");
+    expect(calledUrl.searchParams.get("include")).toBe("venue;country");
   });
 
-  it("get_entity returns the requested league summary", async () => {
+  it("get_league uses the exact league endpoint and output shape", async () => {
     globalThis.fetch = mockFetchJson({
       data: {
         id: 501,
@@ -384,7 +404,7 @@ describe("Tool Handlers", () => {
       },
     });
 
-    const result = await toolMap.get("get_entity")!.handler({ id: 501, type: "league" });
+    const result = await toolMap.get("get_league")!.handler({ id: 501 });
     const parsed = parseToolJson(result);
 
     expect(parsed).toEqual({
@@ -393,11 +413,70 @@ describe("Tool Handlers", () => {
       country: "Scotland",
     });
 
-    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
-    const leagueUrl = new URL(fetchMock.mock.calls[0][0]);
+    const calledUrl = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
+    expect(calledUrl.pathname).toBe("/v3/football/leagues/501");
+    expect(calledUrl.searchParams.get("include")).toBe("country");
+  });
 
-    expect(leagueUrl.pathname).toBe("/v3/football/leagues/501");
-    expect(leagueUrl.searchParams.get("include")).toBe("country");
+  it("get_squad uses the current squad endpoint and maps current squad fields", async () => {
+    globalThis.fetch = mockFetchJson({
+      data: [
+        {
+          player_id: 10,
+          jersey_number: 7,
+          player: { id: 10, display_name: "Bukayo Saka" },
+          position: { name: "Forward" },
+          detailedPosition: { name: "Right Wing" },
+        },
+      ],
+    });
+
+    const result = await toolMap.get("get_squad")!.handler({ team_id: 14 });
+    const parsed = parseToolJson(result);
+
+    expect(parsed).toEqual([
+      {
+        player_id: 10,
+        name: "Bukayo Saka",
+        position: "Forward",
+        detailed_position: "Right Wing",
+        jersey_number: 7,
+      },
+    ]);
+
+    const calledUrl = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
+    expect(calledUrl.pathname).toBe("/v3/football/squads/teams/14");
+    expect(calledUrl.searchParams.get("include")).toBe("player;position;detailedPosition");
+  });
+
+  it("get_squad uses the historic squad endpoint when season_id is provided", async () => {
+    globalThis.fetch = mockFetchJson({
+      data: [
+        {
+          player_id: 11,
+          jersey_number: 8,
+          player: { id: 11, display_name: "Martin Odegaard" },
+          position: { name: "Midfielder" },
+        },
+      ],
+    });
+
+    const result = await toolMap.get("get_squad")!.handler({ team_id: 14, season_id: 2024 });
+    const parsed = parseToolJson(result);
+
+    expect(parsed).toEqual([
+      {
+        player_id: 11,
+        name: "Martin Odegaard",
+        position: "Midfielder",
+        detailed_position: null,
+        jersey_number: 8,
+      },
+    ]);
+
+    const calledUrl = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
+    expect(calledUrl.pathname).toBe("/v3/football/squads/seasons/2024/teams/14");
+    expect(calledUrl.searchParams.get("include")).toBe("player;position");
   });
 
   it("get_matches uses the exact team date-range endpoint for upcoming team fixtures", async () => {
@@ -580,6 +659,196 @@ describe("Tool Handlers", () => {
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
   });
 
+  it("get_fixture_details always includes base fixture data and optional expansions", async () => {
+    globalThis.fetch = mockFetchJson({
+      data: {
+        id: 2001,
+        starting_at: "2026-04-10 16:00:00",
+        state_id: 2,
+        league: { id: 501, name: "Premiership" },
+        participants: [
+          { id: 53, name: "Celtic", meta: { location: "home" } },
+          { id: 62, name: "Rangers", meta: { location: "away" } },
+        ],
+        scores: [
+          { participant_id: 53, description: "CURRENT", score: { goals: 2 } },
+          { participant_id: 62, description: "CURRENT", score: { goals: 1 } },
+        ],
+        lineups: [
+          {
+            player_id: 160208,
+            player_name: "Alejandro Grimaldo",
+            jersey_number: 20,
+            type_id: 11,
+            position: { name: "Defender" },
+          },
+        ],
+        events: [
+          {
+            minute: 23,
+            type_id: 301,
+            player_name: "Alejandro Grimaldo",
+            related_player_name: "Christian Kofane",
+            result: "1-0",
+            info: "Left foot shot",
+            sort_order: 1,
+          },
+        ],
+        statistics: [
+          {
+            participant_id: 53,
+            type_id: 401,
+            data: { value: 62 },
+          },
+          {
+            participant_id: 53,
+            type_id: 402,
+            data: { value: 7 },
+          },
+        ],
+      },
+    });
+
+    const result = await toolMap.get("get_fixture_details")!.handler({
+      fixture_id: 2001,
+      includes: ["lineups", "events", "statistics"],
+    });
+    const parsed = parseToolJson(result);
+
+    expect(parsed).toEqual({
+      id: 2001,
+      home_team: { id: 53, name: "Celtic" },
+      away_team: { id: 62, name: "Rangers" },
+      starting_at: "2026-04-10 16:00:00",
+      state: "LIVE",
+      league: { id: 501, name: "Premiership" },
+      scores: { home: 2, away: 1 },
+      lineups: [
+        {
+          player_id: 160208,
+          player_name: "Alejandro Grimaldo",
+          jersey_number: 20,
+          position: "Defender",
+          type: "lineup",
+        },
+      ],
+      events: [
+        {
+          minute: 23,
+          type: "Goal",
+          player_name: "Alejandro Grimaldo",
+          related_player_name: "Christian Kofane",
+          result: "1-0",
+          info: "Left foot shot",
+        },
+      ],
+      statistics: [
+        {
+          team_id: 53,
+          team_name: "Celtic",
+          stats: {
+            possession: 62,
+            corners: 7,
+          },
+        },
+      ],
+    });
+
+    const calledUrl = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
+    expect(calledUrl.pathname).toBe("/v3/football/fixtures/2001");
+    expect(calledUrl.searchParams.get("include")).toBe(
+      "participants;scores;league;state;lineups;events;statistics",
+    );
+  });
+
+  it("get_historic_seasons returns seasons sorted from most recent to oldest", async () => {
+    globalThis.fetch = mockFetchJson({
+      data: {
+        id: 501,
+        seasons: [
+          {
+            id: 2,
+            name: "2023/2024",
+            is_current: false,
+            finished: true,
+            starting_at: "2023-08-01",
+            ending_at: "2024-05-20",
+          },
+          {
+            id: 3,
+            name: "2024/2025",
+            is_current: true,
+            finished: false,
+            starting_at: "2024-08-01",
+            ending_at: "2025-05-20",
+          },
+        ],
+      },
+    });
+
+    const result = await toolMap.get("get_historic_seasons")!.handler({ league_id: 501 });
+    const parsed = parseToolJson(result);
+
+    expect(parsed).toEqual([
+      {
+        id: 3,
+        name: "2024/2025",
+        is_current: true,
+        finished: false,
+        starting_at: "2024-08-01",
+        ending_at: "2025-05-20",
+      },
+      {
+        id: 2,
+        name: "2023/2024",
+        is_current: false,
+        finished: true,
+        starting_at: "2023-08-01",
+        ending_at: "2024-05-20",
+      },
+    ]);
+
+    const calledUrl = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
+    expect(calledUrl.pathname).toBe("/v3/football/leagues/501");
+    expect(calledUrl.searchParams.get("include")).toBe("seasons");
+  });
+
+  it("get_topscorers resolves the requested type through startup types and applies the limit", async () => {
+    globalThis.fetch = mockFetchJson({
+      data: [
+        {
+          position: 1,
+          total: 20,
+          player: { id: 160208, display_name: "Alejandro Grimaldo" },
+          participant: { id: 53, name: "Celtic" },
+        },
+      ],
+    });
+
+    const result = await toolMap.get("get_topscorers")!.handler({
+      season_id: 2024,
+      type: "goals",
+      limit: 5,
+    });
+    const parsed = parseToolJson(result);
+
+    expect(parsed).toEqual([
+      {
+        position: 1,
+        player: { id: 160208, name: "Alejandro Grimaldo" },
+        team: { id: 53, name: "Celtic" },
+        total: 20,
+      },
+    ]);
+
+    const calledUrl = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
+    expect(calledUrl.pathname).toBe("/v3/football/topscorers/seasons/2024");
+    expect(calledUrl.searchParams.get("include")).toBe("player;participant;type");
+    expect(calledUrl.searchParams.get("filters")).toBe("seasonTopscorerTypes:208");
+    expect(calledUrl.searchParams.get("per_page")).toBe("5");
+    expect(calledUrl.searchParams.get("order")).toBe("asc");
+  });
+
   it("get_standings uses live league standings and maps detail types through startup type data", async () => {
     globalThis.fetch = mockFetchJson(
       {
@@ -635,16 +904,22 @@ describe("Validation", () => {
     );
   });
 
-  it("rejects invalid entity types", async () => {
-    await expect(toolMap.get("get_entity")!.handler({ id: 1, type: "coach" })).rejects.toThrow(
-      "Invalid 'type' value",
-    );
-  });
-
   it("rejects invalid timeframes", async () => {
     await expect(
       toolMap.get("get_matches")!.handler({ id: 14, type: "team", timeframe: "tomorrow" }),
     ).rejects.toThrow("Invalid 'timeframe' value");
+  });
+
+  it("rejects invalid fixture detail includes", async () => {
+    await expect(
+      toolMap.get("get_fixture_details")!.handler({ fixture_id: 1, includes: ["formations"] }),
+    ).rejects.toThrow("Invalid 'includes' value");
+  });
+
+  it("rejects get_topscorers limits above the maximum", async () => {
+    await expect(
+      toolMap.get("get_topscorers")!.handler({ season_id: 2024, type: "goals", limit: 26 }),
+    ).rejects.toThrow("must be less than or equal to 25");
   });
 
   it("rejects invalid standings ids", async () => {
@@ -660,7 +935,7 @@ describe("Resources", () => {
       {
         uri: "sportmonks://documentation",
         name: "Sportmonks Football MCP Overview",
-        description: "Overview of the five-tool Sportmonks football MCP server.",
+        description: "Overview of the Sportmonks football MCP server.",
         mimeType: "text/plain",
       },
     ]);

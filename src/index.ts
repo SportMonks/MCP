@@ -18,12 +18,18 @@ const CORE_API_BASE_URL = "https://api.sportmonks.com/v3/core";
 const DOCUMENTATION_RESOURCE_TEXT = `
 Sportmonks Football MCP Server
 
-This server intentionally exposes only five high-signal tools:
+This server exposes focused Sportmonks football tools, including:
 - search(query, type?)
-- get_entity(id, type)
+- get_player(id)
+- get_team(id)
+- get_league(id)
+- get_squad(team_id, season_id?)
 - get_matches(id, type, timeframe?)
 - get_match_preview(id)
+- get_fixture_details(fixture_id, includes?)
 - get_standings(id)
+- get_historic_seasons(league_id)
+- get_topscorers(season_id, type, limit?)
 
 Authentication
 - Set SPORTMONKS_API_TOKEN before starting the server.
@@ -36,7 +42,7 @@ Behavior Notes
 - Validation errors explain what is wrong and how to fix the request.
 - Search returns at most 10 results.
 - All types and states are fetched on startup and used to build shared mappings.
-- get_entity(player) uses the exact two-step player/team lookup flow to resolve the current team name.
+- get_player uses the exact two-step player/team lookup flow to resolve the current team name.
 - get_matches limits output to:
   - upcoming: 14 days ahead, max 20 fixtures
   - historic: 30 days back, max 20 fixtures
@@ -65,6 +71,8 @@ type SearchEntityType = "player" | "team" | "league" | "all";
 type EntityType = "player" | "team" | "league";
 type MatchEntityType = "team" | "league";
 type MatchTimeframe = "live" | "historic" | "upcoming";
+type FixtureDetailInclude = "lineups" | "events" | "statistics";
+type TopscorerType = "goals" | "assists" | "cards";
 type ToolErrorKind =
   | "authentication_error"
   | "not_found"
@@ -197,6 +205,60 @@ function requireEnumValue<T extends string>(
   return normalizedValue;
 }
 
+function requireOptionalPositiveInteger(value: unknown, fieldName: string) {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+
+  return requirePositiveInteger(value, fieldName);
+}
+
+function requirePositiveIntegerWithMaximum(
+  value: unknown,
+  fieldName: string,
+  defaultValue: number,
+  maximumValue: number,
+) {
+  const normalizedValue =
+    value === undefined || value === null || value === ""
+      ? defaultValue
+      : requirePositiveInteger(value, fieldName);
+
+  if (normalizedValue > maximumValue) {
+    throw new SportmonksToolError(
+      "validation_error",
+      `The '${fieldName}' field must be less than or equal to ${maximumValue}.`,
+      `Call the tool again with '${fieldName}' set to a positive integer between 1 and ${maximumValue}.`,
+    );
+  }
+
+  return normalizedValue;
+}
+
+function requireEnumArray<T extends string>(
+  value: unknown,
+  fieldName: string,
+  allowedValues: readonly T[],
+) {
+  if (value === undefined) {
+    return [] as T[];
+  }
+
+  if (!Array.isArray(value)) {
+    throw new SportmonksToolError(
+      "validation_error",
+      `The '${fieldName}' field must be an array containing only: ${allowedValues.join(", ")}.`,
+      `Call the tool again with '${fieldName}' as an array, for example ['${allowedValues[0]}'].`,
+    );
+  }
+
+  const normalizedValues = value.map((entry) =>
+    requireEnumValue(entry, fieldName, allowedValues),
+  );
+
+  return [...new Set(normalizedValues)];
+}
+
 // ── JSON Helpers ─────────────────────────────────────────────────────────────
 
 function isRecord(value: unknown): value is JsonRecord {
@@ -239,6 +301,14 @@ function getNumber(value: unknown, path: string[]) {
 function getBoolean(value: unknown, path: string[]) {
   const result = readPath(value, path);
   return typeof result === "boolean" ? result : null;
+}
+
+function isScalar(value: unknown): value is string | number | boolean {
+  return (
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  );
 }
 
 function toRecordArray(value: unknown): JsonRecord[] {
@@ -652,6 +722,100 @@ function getFixtureGoalsForParticipant(fixture: unknown, participant: unknown) {
   );
 }
 
+function getTypeLookupLabel(typeId: number | null) {
+  const typeLookup = getTypeLookupById(typeId);
+  return typeLookup?.name ?? typeLookup?.code ?? typeLookup?.developerName ?? null;
+}
+
+function normalizeLookupToken(value: string | null) {
+  return (value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function resolveTopscorerTypeId(type: TopscorerType) {
+  const codeMap: Record<TopscorerType, string[]> = {
+    goals: ["goaltopscorer", "goal-topscorer"],
+    assists: ["assisttopscorer", "assist-topscorer"],
+    cards: ["yellowcards", "yellow-cards"],
+  };
+
+  const targetCodes = codeMap[type];
+
+  for (const typeLookup of typeLookupById.values()) {
+    const code = normalizeLookupToken(typeLookup.code);
+    const developerName = normalizeLookupToken(typeLookup.developerName);
+
+    if (
+      targetCodes.includes(code) ||
+      targetCodes.includes(developerName)
+    ) {
+      return typeLookup.id;
+    }
+  }
+
+  const fallbackMap: Record<TopscorerType, number> = {
+    goals: 208,
+    assists: 209,
+    cards: 84,
+  };
+
+  return fallbackMap[type];
+}
+
+function getFixtureScoreSummary(fixture: unknown) {
+  const { home, away } = getHomeAndAwayParticipants(fixture);
+
+  return {
+    home: getFixtureGoalsForParticipant(fixture, home),
+    away: getFixtureGoalsForParticipant(fixture, away),
+  };
+}
+
+function getLineupType(lineup: unknown): "lineup" | "bench" {
+  const typeId = getNumber(lineup, ["type_id"]);
+  const typeLabel = (
+    getTypeLookupLabel(typeId) ??
+    getString(lineup, ["type"]) ??
+    getPreferredName(readPath(lineup, ["type"])) ??
+    ""
+  ).toLowerCase();
+
+  if (typeId === 12 || typeLabel.includes("bench") || typeLabel.includes("substitut")) {
+    return "bench";
+  }
+
+  if (typeId === 11 || typeLabel.includes("lineup") || typeLabel.includes("starting")) {
+    return "lineup";
+  }
+
+  return readPath(lineup, ["formation_field"]) !== undefined &&
+    readPath(lineup, ["formation_field"]) !== null
+    ? "lineup"
+    : "bench";
+}
+
+function toSnakeCaseKey(value: string | null) {
+  const normalized = (value ?? "unknown").toLowerCase().replace(/[^a-z0-9]+/g, "_");
+  return normalized.replace(/^_+|_+$/g, "") || "unknown";
+}
+
+function getStatisticValue(statistic: unknown): unknown {
+  const data = readPath(statistic, ["data"]);
+  if (isRecord(data)) {
+    if (isScalar(data.value)) {
+      return data.value;
+    }
+
+    if (isScalar(data.total)) {
+      return data.total;
+    }
+
+    return data;
+  }
+
+  const directValue = readPath(statistic, ["value"]);
+  return directValue ?? null;
+}
+
 function mapSearchResult(record: unknown, entityType: Exclude<SearchEntityType, "all">) {
   return {
     id: getNumber(record, ["id"]),
@@ -844,8 +1008,16 @@ async function fetchEntity(id: number, type: EntityType) {
   }
 }
 
-async function getEntity(id: number, type: EntityType) {
-  return jsonResponse(await fetchEntity(id, type));
+async function getPlayer(id: number) {
+  return jsonResponse(await fetchEntity(id, "player"));
+}
+
+async function getTeam(id: number) {
+  return jsonResponse(await fetchEntity(id, "team"));
+}
+
+async function getLeague(id: number) {
+  return jsonResponse(await fetchEntity(id, "league"));
 }
 
 async function fetchMatches(id: number, type: MatchEntityType, timeframe: MatchTimeframe) {
@@ -910,6 +1082,40 @@ async function getMatches(id: number, type: MatchEntityType, timeframe: MatchTim
   return jsonResponse(await fetchMatches(id, type, timeframe));
 }
 
+async function fetchSquad(teamId: number, seasonId?: number) {
+  const endpoint =
+    seasonId === undefined
+      ? `/squads/teams/${teamId}`
+      : `/squads/seasons/${seasonId}/teams/${teamId}`;
+  const include =
+    seasonId === undefined
+      ? "player;position;detailedPosition"
+      : "player;position";
+
+  const payload = await apiRequest(endpoint, { include });
+
+  return getResponseItems(payload).map((record) => {
+    const player = toRecordArray(readPath(record, ["player"]))[0] ?? null;
+    const position = readPath(record, ["position"]);
+    const detailedPosition = readPath(record, ["detailedPosition"]);
+
+    return {
+      player_id: getNumber(player, ["id"]) ?? getNumber(record, ["player_id"]),
+      name: getPreferredName(player) ?? getString(record, ["player_name"]),
+      position: getPreferredName(position),
+      detailed_position: getPreferredName(detailedPosition),
+      jersey_number:
+        getNumber(record, ["jersey_number"]) ??
+        getNumber(record, ["number"]) ??
+        getNumber(player, ["jersey_number"]),
+    };
+  });
+}
+
+async function getSquad(teamId: number, seasonId?: number) {
+  return jsonResponse(await fetchSquad(teamId, seasonId));
+}
+
 async function fetchMatchPreview(id: number) {
   const fixturePayload = await apiRequest(`/fixtures/${id}`, {
     include: "participants",
@@ -971,6 +1177,121 @@ async function getMatchPreview(id: number) {
   return jsonResponse(await fetchMatchPreview(id));
 }
 
+async function fetchFixtureDetails(
+  fixtureId: number,
+  includes: FixtureDetailInclude[],
+) {
+  const includeValue = ["participants", "scores", "league", "state", ...includes].join(";");
+  const payload = await apiRequest(`/fixtures/${fixtureId}`, {
+    include: includeValue,
+  });
+  const fixture = getSingleResponseItem(payload, "Fixture");
+  const { home, away } = getHomeAndAwayParticipants(fixture);
+  const scoreSummary = getFixtureScoreSummary(fixture);
+
+  const response: JsonRecord = {
+    id: getNumber(fixture, ["id"]),
+    home_team: {
+      id: getNumber(home, ["id"]),
+      name: getPreferredName(home),
+    },
+    away_team: {
+      id: getNumber(away, ["id"]),
+      name: getPreferredName(away),
+    },
+    starting_at: getString(fixture, ["starting_at"]),
+    state: getStateName(fixture),
+    league: getLeagueSummary(fixture),
+    scores: {
+      home: scoreSummary.home,
+      away: scoreSummary.away,
+    },
+  };
+
+  if (includes.includes("lineups")) {
+    const lineups = toRecordArray(readPath(fixture, ["lineups"]));
+    response.lineups = lineups.map((lineup) => {
+      const player = toRecordArray(readPath(lineup, ["player"]))[0] ?? null;
+      const position = readPath(lineup, ["position"]);
+      const detailedPosition = readPath(lineup, ["detailedPosition"]);
+
+      return {
+        player_id: getNumber(player, ["id"]) ?? getNumber(lineup, ["player_id"]),
+        player_name: getPreferredName(player) ?? getString(lineup, ["player_name"]),
+        jersey_number:
+          getNumber(lineup, ["jersey_number"]) ??
+          getNumber(lineup, ["number"]) ??
+          getNumber(player, ["jersey_number"]),
+        position: getPreferredName(detailedPosition) ?? getPreferredName(position),
+        type: getLineupType(lineup),
+      };
+    });
+  }
+
+  if (includes.includes("events")) {
+    const events = toRecordArray(readPath(fixture, ["events"])).sort((left, right) => {
+      const leftOrder = getNumber(left, ["sort_order"]) ?? getNumber(left, ["minute"]) ?? 0;
+      const rightOrder = getNumber(right, ["sort_order"]) ?? getNumber(right, ["minute"]) ?? 0;
+      return leftOrder - rightOrder;
+    });
+
+    response.events = events.map((event) => ({
+      minute: getNumber(event, ["minute"]),
+      type:
+        getTypeLookupLabel(getNumber(event, ["type_id"])) ??
+        getPreferredName(readPath(event, ["type"])) ??
+        getString(event, ["type"]),
+      player_name: getString(event, ["player_name"]),
+      related_player_name: getString(event, ["related_player_name"]),
+      result: getString(event, ["result"]),
+      info: getString(event, ["info"]),
+    }));
+  }
+
+  if (includes.includes("statistics")) {
+    const participants = toRecordArray(readPath(fixture, ["participants"]));
+    const participantById = new Map(
+      participants
+        .map((participant) => [getNumber(participant, ["id"]), participant] as const)
+        .filter(([participantId]) => participantId !== null),
+    );
+    const groupedStatistics = new Map<
+      number,
+      { team_id: number; team_name: string | null; stats: Record<string, unknown> }
+    >();
+
+    for (const statistic of toRecordArray(readPath(fixture, ["statistics"]))) {
+      const participantId = getNumber(statistic, ["participant_id"]);
+      if (participantId === null) {
+        continue;
+      }
+
+      const participant = participantById.get(participantId) ?? null;
+      const key = toSnakeCaseKey(
+        getTypeLookupLabel(getNumber(statistic, ["type_id"])) ??
+          getPreferredName(readPath(statistic, ["type"])),
+      );
+      const existing =
+        groupedStatistics.get(participantId) ?? {
+          team_id: participantId,
+          team_name: getPreferredName(participant),
+          stats: {},
+        };
+
+      existing.stats[key] = getStatisticValue(statistic);
+      groupedStatistics.set(participantId, existing);
+    }
+
+    response.statistics = [...groupedStatistics.values()];
+  }
+
+  return response;
+}
+
+async function getFixtureDetails(fixtureId: number, includes: FixtureDetailInclude[]) {
+  return jsonResponse(await fetchFixtureDetails(fixtureId, includes));
+}
+
 async function fetchStandings(leagueId: number) {
   await getEntityReference(leagueId, "league");
 
@@ -983,6 +1304,74 @@ async function fetchStandings(leagueId: number) {
 
 async function getStandings(leagueId: number) {
   return jsonResponse(await fetchStandings(leagueId));
+}
+
+async function fetchHistoricSeasons(leagueId: number) {
+  const payload = await apiRequest(`/leagues/${leagueId}`, { include: "seasons" });
+  const league = getSingleResponseItem(payload, "League");
+  const seasons = toRecordArray(readPath(league, ["seasons"]));
+
+  return seasons
+    .map((season) => ({
+      id: getNumber(season, ["id"]),
+      name: getPreferredName(season),
+      is_current:
+        getBoolean(season, ["is_current"]) ??
+        getBoolean(season, ["current"]) ??
+        false,
+      finished: getBoolean(season, ["finished"]) ?? false,
+      starting_at: getString(season, ["starting_at"]),
+      ending_at: getString(season, ["ending_at"]),
+    }))
+    .sort((left, right) => {
+      const leftDate = parseDateToMs(left.ending_at) || parseDateToMs(left.starting_at);
+      const rightDate = parseDateToMs(right.ending_at) || parseDateToMs(right.starting_at);
+      return rightDate - leftDate;
+    });
+}
+
+async function getHistoricSeasons(leagueId: number) {
+  return jsonResponse(await fetchHistoricSeasons(leagueId));
+}
+
+async function fetchTopscorers(
+  seasonId: number,
+  type: TopscorerType,
+  limit: number,
+) {
+  const topscorerTypeId = resolveTopscorerTypeId(type);
+  const payload = await apiRequest(`/topscorers/seasons/${seasonId}`, {
+    include: "player;participant;type",
+    filters: `seasonTopscorerTypes:${topscorerTypeId}`,
+    per_page: limit,
+    order: "asc",
+  });
+
+  return getResponseItems(payload).slice(0, limit).map((record) => {
+    const player = toRecordArray(readPath(record, ["player"]))[0] ?? null;
+    const team = toRecordArray(readPath(record, ["participant"]))[0] ?? null;
+
+    return {
+      position: getNumber(record, ["position"]),
+      player: {
+        id: getNumber(player, ["id"]) ?? getNumber(record, ["player_id"]),
+        name: getPreferredName(player),
+      },
+      team: {
+        id: getNumber(team, ["id"]) ?? getNumber(record, ["participant_id"]),
+        name: getPreferredName(team),
+      },
+      total: getNumber(record, ["total"]),
+    };
+  });
+}
+
+async function getTopscorers(
+  seasonId: number,
+  type: TopscorerType,
+  limit: number,
+) {
+  return jsonResponse(await fetchTopscorers(seasonId, type, limit));
 }
 
 async function getEntityReference(id: number, type: MatchEntityType) {
@@ -1023,28 +1412,84 @@ const tools: ToolDefinition[] = [
     },
   },
   {
-    name: "get_entity",
-    description: "Get player, team, or league details by Sportmonks id.",
+    name: "get_player",
+    description: "Gets player details by Sportmonks player id.",
     inputSchema: {
       type: "object",
       properties: {
         id: {
           type: "integer",
-          description: "Sportmonks entity id.",
-        },
-        type: {
-          type: "string",
-          enum: ["player", "team", "league"],
-          description: "Entity type to fetch.",
+          description: "Sportmonks player id.",
         },
       },
-      required: ["id", "type"],
+      required: ["id"],
     },
     async handler(args) {
       await initializeReferenceData();
       const id = requirePositiveInteger(args.id, "id");
-      const type = requireEnumValue(args.type, "type", ["player", "team", "league"]);
-      return getEntity(id, type);
+      return getPlayer(id);
+    },
+  },
+  {
+    name: "get_team",
+    description: "Gets team details by Sportmonks team id.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: {
+          type: "integer",
+          description: "Sportmonks team id.",
+        },
+      },
+      required: ["id"],
+    },
+    async handler(args) {
+      await initializeReferenceData();
+      const id = requirePositiveInteger(args.id, "id");
+      return getTeam(id);
+    },
+  },
+  {
+    name: "get_league",
+    description: "Gets league details by Sportmonks league id.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: {
+          type: "integer",
+          description: "Sportmonks league id.",
+        },
+      },
+      required: ["id"],
+    },
+    async handler(args) {
+      await initializeReferenceData();
+      const id = requirePositiveInteger(args.id, "id");
+      return getLeague(id);
+    },
+  },
+  {
+    name: "get_squad",
+    description: "Gets the squad for a team, optionally for a specific historic season.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        team_id: {
+          type: "integer",
+          description: "Sportmonks team id.",
+        },
+        season_id: {
+          type: "integer",
+          description: "Sportmonks season id. Omit for the current squad.",
+        },
+      },
+      required: ["team_id"],
+    },
+    async handler(args) {
+      await initializeReferenceData();
+      const teamId = requirePositiveInteger(args.team_id, "team_id");
+      const seasonId = requireOptionalPositiveInteger(args.season_id, "season_id");
+      return getSquad(teamId, seasonId);
     },
   },
   {
@@ -1103,6 +1548,40 @@ const tools: ToolDefinition[] = [
     },
   },
   {
+    name: "get_fixture_details",
+    description:
+      "Gets detailed fixture data with optional whitelisted expansions for lineups, events, and statistics.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        fixture_id: {
+          type: "integer",
+          description: "Sportmonks fixture id.",
+        },
+        includes: {
+          type: "array",
+          items: {
+            type: "string",
+            enum: ["lineups", "events", "statistics"],
+          },
+          description:
+            "Optional subset of ['lineups', 'events', 'statistics'] to expand on top of the base fixture data.",
+        },
+      },
+      required: ["fixture_id"],
+    },
+    async handler(args) {
+      await initializeReferenceData();
+      const fixtureId = requirePositiveInteger(args.fixture_id, "fixture_id");
+      const includes = requireEnumArray(
+        args.includes,
+        "includes",
+        ["lineups", "events", "statistics"],
+      );
+      return getFixtureDetails(fixtureId, includes);
+    },
+  },
+  {
     name: "get_standings",
     description: "Get the live league standings for a Sportmonks league id.",
     inputSchema: {
@@ -1121,6 +1600,56 @@ const tools: ToolDefinition[] = [
       return getStandings(leagueId);
     },
   },
+  {
+    name: "get_historic_seasons",
+    description:
+      "Gets all historic and current seasons for a league, sorted with the most recent first.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        league_id: {
+          type: "integer",
+          description: "Sportmonks league id.",
+        },
+      },
+      required: ["league_id"],
+    },
+    async handler(args) {
+      await initializeReferenceData();
+      const leagueId = requirePositiveInteger(args.league_id, "league_id");
+      return getHistoricSeasons(leagueId);
+    },
+  },
+  {
+    name: "get_topscorers",
+    description: "Gets the top scorers, assisters, or card recipients for a season.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        season_id: {
+          type: "integer",
+          description: "Sportmonks season id.",
+        },
+        type: {
+          type: "string",
+          enum: ["goals", "assists", "cards"],
+          description: "Topscorer type to fetch.",
+        },
+        limit: {
+          type: "integer",
+          description: "Optional result limit. Defaults to 10 and cannot exceed 25.",
+        },
+      },
+      required: ["season_id", "type"],
+    },
+    async handler(args) {
+      await initializeReferenceData();
+      const seasonId = requirePositiveInteger(args.season_id, "season_id");
+      const type = requireEnumValue(args.type, "type", ["goals", "assists", "cards"]);
+      const limit = requirePositiveIntegerWithMaximum(args.limit, "limit", 10, 25);
+      return getTopscorers(seasonId, type, limit);
+    },
+  },
 ];
 
 // ── Resources ────────────────────────────────────────────────────────────────
@@ -1129,7 +1658,7 @@ const resources: ResourceDefinition[] = [
   {
     uri: "sportmonks://documentation",
     name: "Sportmonks Football MCP Overview",
-    description: "Overview of the five-tool Sportmonks football MCP server.",
+    description: "Overview of the Sportmonks football MCP server.",
     mimeType: "text/plain",
   },
 ];

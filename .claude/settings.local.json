@@ -2,10 +2,18 @@
   "permissions": {
     "allow": [
       "mcp__sportmonks-football__search",
-      "mcp__sportmonks-football__get_entity",
+      "mcp__sportmonks-football__get_player",
+      "mcp__sportmonks-football__get_team",
+      "mcp__sportmonks-football__get_league",
+      "mcp__sportmonks-football__get_squad",
       "mcp__sportmonks-football__get_matches",
       "mcp__sportmonks-football__get_match_preview",
-      "mcp__sportmonks-football__get_standings"
+      "mcp__sportmonks-football__get_fixture_details",
+      "mcp__sportmonks-football__get_standings",
+      "mcp__sportmonks-football__get_historic_seasons",
+      "mcp__sportmonks-football__get_topscorers",
+      "WebFetch(domain:docs.sportmonks.com)",
+      "WebSearch"
     ]
   }
 }
