@@ -16,41 +16,23 @@ This server exposes focused Sportmonks Football API tools for search, player/tea
 
 ## Configuration
 
-| Variable | Required | Description |
-| --- | --- | --- |
-| `SPORTMONKS_API_TOKEN` | Yes | Your Sportmonks API token from MySportmonks |
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `SPORTMONKS_API_TOKEN` | Yes | — | Your Sportmonks API token from MySportmonks |
+| `SPORTMONKS_LOG_FILE` | No | `<os.tmpdir()>/sportmonks-football-mcp.log` | Absolute path for the local tool-call log. Set to `off`, `none`, or empty to disable file logging |
 
 Sportmonks authentication follows the official `api_token` query parameter approach documented at https://docs.sportmonks.com/v3/welcome/authentication.
 
-## Local Setup
+## Installation
 
-```bash
-npm install
-npm run build
-```
-
-Run locally:
-
-```bash
-SPORTMONKS_API_TOKEN="your-token" node dist/index.js
-```
-
-Development mode:
-
-```bash
-SPORTMONKS_API_TOKEN="your-token" npm run dev
-```
-
-## MCP Client Examples
-
-Build the project first, then point your MCP client at the compiled entrypoint.
+The published npm binary works with any MCP client. Each example below fetches the package on first run (via `npx -y`) and starts the server; no manual install required.
 
 ### Claude Code CLI
 
 ```bash
 claude mcp add sportmonks-football \
   --env SPORTMONKS_API_TOKEN="your-token" \
-  -- node /absolute/path/to/dist/index.js
+  -- npx -y sportmonks-football-mcp-server
 ```
 
 ### Claude Desktop
@@ -59,8 +41,8 @@ claude mcp add sportmonks-football \
 {
   "mcpServers": {
     "sportmonks-football": {
-      "command": "node",
-      "args": ["/absolute/path/to/dist/index.js"],
+      "command": "npx",
+      "args": ["-y", "sportmonks-football-mcp-server"],
       "env": {
         "SPORTMONKS_API_TOKEN": "your-token"
       }
@@ -75,8 +57,8 @@ claude mcp add sportmonks-football \
 {
   "mcpServers": {
     "sportmonks-football": {
-      "command": "node",
-      "args": ["/absolute/path/to/dist/index.js"],
+      "command": "npx",
+      "args": ["-y", "sportmonks-football-mcp-server"],
       "env": {
         "SPORTMONKS_API_TOKEN": "your-token"
       }
@@ -91,8 +73,8 @@ claude mcp add sportmonks-football \
 {
   "servers": {
     "sportmonks-football": {
-      "command": "node",
-      "args": ["/absolute/path/to/dist/index.js"],
+      "command": "npx",
+      "args": ["-y", "sportmonks-football-mcp-server"],
       "env": {
         "SPORTMONKS_API_TOKEN": "your-token"
       }
@@ -100,6 +82,18 @@ claude mcp add sportmonks-football \
   }
 }
 ```
+
+### Install from source
+
+For contributing or running against unreleased changes:
+
+```bash
+npm install
+npm run build
+SPORTMONKS_API_TOKEN="your-token" node dist/index.js
+```
+
+Point your MCP client at the compiled entrypoint (`node /absolute/path/to/dist/index.js`) instead of the `npx` command.
 
 ## Available Tools
 
@@ -232,6 +226,21 @@ Inputs:
 
 Output:
 - JSON array with `position`, `player`, `team`, and `total`
+
+## Resources
+
+The server exposes two MCP Resources. Fetch them via `resources/read` (or `@`-mention in clients that support it, e.g. Claude Desktop, Cursor).
+
+| URI | MIME type | Content |
+| --- | --- | --- |
+| `sportmonks://documentation` | `text/plain` | Server overview: tool list, behavior notes, links to official Sportmonks docs |
+| `sportmonks://openapi` | `application/json` | Official Sportmonks Football OpenAPI spec (fetched fresh on every read) |
+
+Claude Code does not auto-load resources — users attach them explicitly via `@`-mention when needed.
+
+## Observability
+
+The server writes one JSON line per tool call to stderr and to a local log file, including tool name, arguments, duration, and outcome. See [OBSERVABILITY.md](OBSERVABILITY.md) for the log format, default paths per OS, and debugging flows.
 
 ## Error Format
 

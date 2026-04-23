@@ -10,11 +10,16 @@ import {
   ListPromptsRequestSchema,
   GetPromptRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { performance } from "node:perf_hooks";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const FOOTBALL_API_BASE_URL = "https://api.sportmonks.com/v3/football";
 const CORE_API_BASE_URL = "https://api.sportmonks.com/v3/core";
+const OPENAPI_SPEC_URL = "https://vercel-eight-cyan-93.vercel.app/openapi_spec.json";
 const DOCUMENTATION_RESOURCE_TEXT = `
 Sportmonks Football MCP Server
 
@@ -49,6 +54,10 @@ Behavior Notes
   - live: max 20 fixtures
 - get_match_preview only works for fixtures that have not started yet.
 
+Related Resources
+- sportmonks://documentation: this overview.
+- sportmonks://openapi: OpenAPI spec fetched from the Sportmonks docs host on read.
+
 Official References
 - Welcome: https://docs.sportmonks.com/football
 - Authentication: https://docs.sportmonks.com/v3/welcome/authentication
@@ -57,7 +66,7 @@ Official References
 - Best practices: https://docs.sportmonks.com/v3/welcome/best-practices
 `.trim();
 
-const SPORTMONKS_SERVER_VERSION = "1.1.0";
+const SPORTMONKS_SERVER_VERSION = "1.2.0";
 const MAX_SEARCH_RESULTS = 10;
 const MAX_MATCH_RESULTS = 20;
 const UPCOMING_WINDOW_DAYS = 14;
@@ -591,6 +600,48 @@ async function initializeReferenceData() {
 
 function primeReferenceData(typeRecords: JsonRecord[], stateRecords: JsonRecord[]) {
   setReferenceData(typeRecords, stateRecords);
+}
+
+// ── Observability ────────────────────────────────────────────────────────────
+
+const DEFAULT_LOG_FILE_PATH = path.join(os.tmpdir(), "sportmonks-football-mcp.log");
+
+function resolveLogFilePath() {
+  const configured = process.env.SPORTMONKS_LOG_FILE;
+  if (configured === undefined) {
+    return DEFAULT_LOG_FILE_PATH;
+  }
+
+  const trimmed = configured.trim();
+  if (trimmed === "" || trimmed.toLowerCase() === "off" || trimmed.toLowerCase() === "none") {
+    return null;
+  }
+
+  return trimmed;
+}
+
+const LOG_FILE_PATH = resolveLogFilePath();
+
+interface ToolCallLogEntry {
+  ts: string;
+  tool: string;
+  args: Record<string, unknown>;
+  duration_ms: number;
+  outcome: "ok" | "error";
+  error_kind?: string;
+}
+
+function recordToolCall(entry: ToolCallLogEntry) {
+  const line = JSON.stringify(entry);
+  process.stderr.write(line + "\n");
+
+  if (LOG_FILE_PATH !== null) {
+    try {
+      fs.appendFileSync(LOG_FILE_PATH, line + "\n");
+    } catch {
+      // Logging must never break tool execution, so swallow file errors.
+    }
+  }
 }
 
 // ── Response Helpers ─────────────────────────────────────────────────────────
@@ -1661,7 +1712,49 @@ const resources: ResourceDefinition[] = [
     description: "Overview of the Sportmonks football MCP server.",
     mimeType: "text/plain",
   },
+  {
+    uri: "sportmonks://openapi",
+    name: "Sportmonks Football API OpenAPI Spec",
+    description:
+      "OpenAPI specification for the Sportmonks Football API 3.0. Fetched on read.",
+    mimeType: "application/json",
+  },
 ];
+
+async function fetchOpenApiSpec() {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(OPENAPI_SPEC_URL, { signal: controller.signal });
+
+    if (!response.ok) {
+      throw new SportmonksToolError(
+        "upstream_error",
+        `Failed to fetch OpenAPI spec. HTTP ${response.status}.`,
+        "Retry later. If the error persists, the OpenAPI spec host may be unavailable.",
+      );
+    }
+
+    return JSON.stringify(await response.json(), null, 2);
+  } catch (error) {
+    if (error instanceof SportmonksToolError) {
+      throw error;
+    }
+
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new SportmonksToolError(
+        "upstream_error",
+        `OpenAPI spec host did not respond within ${API_TIMEOUT_MS / 1000} seconds.`,
+        "Retry later. If the timeout keeps happening, the OpenAPI spec host may be unavailable.",
+      );
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 async function readResource(uri: string) {
   switch (uri) {
@@ -1669,11 +1762,17 @@ async function readResource(uri: string) {
       return {
         contents: [{ uri, mimeType: "text/plain", text: DOCUMENTATION_RESOURCE_TEXT }],
       };
+    case "sportmonks://openapi": {
+      const text = await fetchOpenApiSpec();
+      return {
+        contents: [{ uri, mimeType: "application/json", text }],
+      };
+    }
     default:
       throw new SportmonksToolError(
         "not_found",
         `Unknown resource: ${uri}`,
-        "Use 'sportmonks://documentation' or list resources again.",
+        "Use 'sportmonks://documentation' or 'sportmonks://openapi', or list resources again.",
       );
   }
 }
@@ -1922,8 +2021,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
   const tool = toolMap.get(name);
+  const safeArgs = (args ?? {}) as Record<string, unknown>;
+  const startedAt = performance.now();
 
   if (!tool) {
+    recordToolCall({
+      ts: new Date().toISOString(),
+      tool: name,
+      args: safeArgs,
+      duration_ms: Math.round(performance.now() - startedAt),
+      outcome: "error",
+      error_kind: "tool_error",
+    });
     return errorResponse(
       new SportmonksToolError(
         "tool_error",
@@ -1934,8 +2043,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   try {
-    return await tool.handler(args ?? {});
+    const result = await tool.handler(safeArgs);
+    recordToolCall({
+      ts: new Date().toISOString(),
+      tool: name,
+      args: safeArgs,
+      duration_ms: Math.round(performance.now() - startedAt),
+      outcome: result.isError ? "error" : "ok",
+    });
+    return result;
   } catch (error) {
+    const errorKind = error instanceof SportmonksToolError ? error.kind : "tool_error";
+    recordToolCall({
+      ts: new Date().toISOString(),
+      tool: name,
+      args: safeArgs,
+      duration_ms: Math.round(performance.now() - startedAt),
+      outcome: "error",
+      error_kind: errorKind,
+    });
     return errorResponse(error);
   }
 });

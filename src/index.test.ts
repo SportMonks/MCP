@@ -930,7 +930,17 @@ describe("Validation", () => {
 });
 
 describe("Resources", () => {
-  it("lists the documentation resource", () => {
+  let originalFetch: typeof globalThis.fetch;
+
+  beforeEach(() => {
+    originalFetch = globalThis.fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("lists the documentation and openapi resources", () => {
     expect(resources).toEqual([
       {
         uri: "sportmonks://documentation",
@@ -938,12 +948,53 @@ describe("Resources", () => {
         description: "Overview of the Sportmonks football MCP server.",
         mimeType: "text/plain",
       },
+      {
+        uri: "sportmonks://openapi",
+        name: "Sportmonks Football API OpenAPI Spec",
+        description:
+          "OpenAPI specification for the Sportmonks Football API 3.0. Fetched on read.",
+        mimeType: "application/json",
+      },
     ]);
   });
 
   it("returns the documentation overview text", async () => {
     const resource = await readResource("sportmonks://documentation");
     expect(resource.contents[0].text).toBe(DOCUMENTATION_RESOURCE_TEXT);
+  });
+
+  it("fetches the OpenAPI spec lazily on read", async () => {
+    const spec = { openapi: "3.0.3", info: { title: "Test" } };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve(spec),
+      text: () => Promise.resolve(JSON.stringify(spec)),
+    });
+    globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+    const resource = await readResource("sportmonks://openapi");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const calledUrl = String(fetchMock.mock.calls[0][0]);
+    expect(calledUrl).toBe("https://vercel-eight-cyan-93.vercel.app/openapi_spec.json");
+    expect(resource.contents[0].mimeType).toBe("application/json");
+    expect(JSON.parse(resource.contents[0].text as string)).toEqual(spec);
+  });
+
+  it("wraps upstream failures as upstream_error", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 502,
+      json: () => Promise.resolve({}),
+      text: () => Promise.resolve(""),
+    }) as unknown as typeof globalThis.fetch;
+
+    await expect(readResource("sportmonks://openapi")).rejects.toThrow("HTTP 502");
+  });
+
+  it("rejects unknown resource URIs", async () => {
+    await expect(readResource("sportmonks://unknown")).rejects.toThrow("Unknown resource");
   });
 });
 
