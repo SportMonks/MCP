@@ -42,10 +42,13 @@ Authentication
 
 Behavior Notes
 - All tool outputs are valid JSON.
-- List-style tools return JSON arrays of objects.
-- Detail tools return JSON objects.
+- List-style tools (search, get_matches, get_topscorers, get_standings, get_squad) return an envelope
+  '{ "data": [...], "meta": { "returned", "cap", "possibly_more", "date_window?" } }'.
+  Use 'meta.possibly_more' to detect server-side or local truncation.
+- Single-entity tools (get_player, get_team, get_league, get_match_preview, get_fixture_details,
+  get_historic_seasons) return a JSON object or array directly, without an envelope.
 - Validation errors explain what is wrong and how to fix the request.
-- Search returns at most 10 results.
+- Search returns at most 10 results; meta.possibly_more flags when more matched upstream.
 - All types and states are fetched on startup and used to build shared mappings.
 - get_player uses the exact two-step player/team lookup flow to resolve the current team name.
 - get_matches limits output to:
@@ -358,12 +361,17 @@ function getSingleResponseItem(payload: unknown, label: string) {
 }
 
 function getPreferredName(record: unknown) {
-  return (
+  // Sportmonks occasionally returns names with trailing whitespace
+  // (e.g. "Bernardo Silva  ", "Rúben Dias "). Trim so downstream string
+  // matching and rendering aren't tripped up.
+  const raw =
     getString(record, ["display_name"]) ??
     getString(record, ["name"]) ??
     getString(record, ["common_name"]) ??
-    getString(record, ["short_code"])
-  );
+    getString(record, ["short_code"]);
+  if (raw === null) return null;
+  const trimmed = raw.trim();
+  return trimmed === "" ? null : trimmed;
 }
 
 function getLocalDateString(date: Date) {
@@ -646,6 +654,32 @@ function recordToolCall(entry: ToolCallLogEntry) {
 
 // ── Response Helpers ─────────────────────────────────────────────────────────
 
+interface ListMeta {
+  returned: number;
+  cap: number;
+  possibly_more: boolean;
+  date_window?: { start: string; end: string };
+}
+
+function buildListMeta(
+  returned: number,
+  cap: number,
+  upstreamHasMore: boolean | null,
+  dateWindow?: { start: string; end: string },
+): ListMeta {
+  const meta: ListMeta = {
+    returned,
+    cap,
+    possibly_more: upstreamHasMore === true || returned >= cap,
+  };
+  if (dateWindow) meta.date_window = dateWindow;
+  return meta;
+}
+
+function listResponse<T>(data: T[], meta: ListMeta): { data: T[]; meta: ListMeta } {
+  return { data, meta };
+}
+
 function jsonResponse(data: unknown): ToolResponse {
   return {
     content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
@@ -888,6 +922,12 @@ function mapMatch(record: unknown) {
   };
 }
 
+function isUsableMatchRow(row: ReturnType<typeof mapMatch>): boolean {
+  // Drop placeholder rows where Sportmonks returned a stub object with no real
+  // fixture id. Defense-in-depth alongside getEntityReference's id check.
+  return row.id !== null;
+}
+
 function getTypeLookupById(typeId: number | null) {
   if (typeId === null) {
     return null;
@@ -896,29 +936,40 @@ function getTypeLookupById(typeId: number | null) {
   return typeLookupById.get(typeId) ?? null;
 }
 
-function pickCurrentTeam(playerRecord: unknown) {
+function orderedClubCandidates(playerRecord: unknown): JsonRecord[] {
+  // Returns player.teams[] entries sorted club-first / active-first so the
+  // caller can iterate and verify with /teams/{id} when the relation row
+  // doesn't expose team.type. Order:
+  //   1. Relations whose nested team.type is NOT "national" / "national_team"
+  //      AND whose end is null (currently active).
+  //   2. Relations whose nested team.type isn't visible AND end is null.
+  //   3. Relations whose nested team.type IS national but end is null
+  //      (last-resort, e.g. all relations are national for some reason).
+  //   4. Anything else, sorted by most recent activity.
+  // We still let the caller fetch /teams/{id} and re-check team.type as a
+  // final guard, since some plans don't populate the nested type field.
   const teams = toRecordArray(readPath(playerRecord, ["teams"]));
-  if (teams.length === 0) {
-    return null;
-  }
+  if (teams.length === 0) return [];
 
-  const domesticTeams = teams.filter((team) => getString(team, ["type"]) !== "national_team");
-  const candidateTeams = domesticTeams.length > 0 ? domesticTeams : teams;
+  const score = (relation: unknown): number => {
+    const nestedType = (getString(relation, ["team", "type"]) ?? "").toLowerCase();
+    const isNationalKnown = nestedType === "national" || nestedType === "national_team";
+    const isDomesticKnown = nestedType === "domestic";
+    const endValue =
+      getString(relation, ["meta", "end"]) ??
+      getString(relation, ["meta", "end_at"]) ??
+      getString(relation, ["end_at"]);
+    const isActive = endValue === null;
 
-  const activeTeam =
-    candidateTeams.find((team) => {
-      const endValue =
-        getString(team, ["meta", "end"]) ??
-        getString(team, ["meta", "end_at"]) ??
-        getString(team, ["end_at"]);
-      return endValue === null;
-    }) ?? null;
+    if (isDomesticKnown && isActive) return 0;
+    if (!isNationalKnown && isActive) return 1;
+    if (isActive) return 2; // active national, last-resort active
+    return 3;
+  };
 
-  if (activeTeam) {
-    return activeTeam;
-  }
-
-  return [...candidateTeams].sort((left, right) => {
+  return [...teams].sort((left, right) => {
+    const scoreDiff = score(left) - score(right);
+    if (scoreDiff !== 0) return scoreDiff;
     const leftDate = parseDateToMs(
       getString(left, ["last_played_at"]) ??
         getString(left, ["meta", "start"]) ??
@@ -930,7 +981,7 @@ function pickCurrentTeam(playerRecord: unknown) {
         getString(right, ["meta", "start_at"]),
     );
     return rightDate - leftDate;
-  })[0];
+  });
 }
 
 function getStandingStat(details: JsonRecord[], typeIds: number[], typeCodes: string[]) {
@@ -979,10 +1030,13 @@ function mapStanding(record: unknown) {
 // ── Tool Implementations ─────────────────────────────────────────────────────
 
 async function fetchSearchResults(query: string, type: SearchEntityType) {
+  // Pull a wider page than we expose so we can detect upstream truncation via
+  // pagination.has_more, then trim back to MAX_SEARCH_RESULTS.
+  const upstreamPerPage = Math.max(MAX_SEARCH_RESULTS * 5, 50);
   const entityLoaders: Record<Exclude<SearchEntityType, "all">, () => Promise<unknown>> = {
-    player: () => apiRequest(`/players/search/${encodeURIComponent(query)}`, { per_page: MAX_SEARCH_RESULTS }),
-    team: () => apiRequest(`/teams/search/${encodeURIComponent(query)}`, { per_page: MAX_SEARCH_RESULTS }),
-    league: () => apiRequest(`/leagues/search/${encodeURIComponent(query)}`, { per_page: MAX_SEARCH_RESULTS }),
+    player: () => apiRequest(`/players/search/${encodeURIComponent(query)}`, { per_page: upstreamPerPage }),
+    team: () => apiRequest(`/teams/search/${encodeURIComponent(query)}`, { per_page: upstreamPerPage }),
+    league: () => apiRequest(`/leagues/search/${encodeURIComponent(query)}`, { per_page: upstreamPerPage }),
   };
 
   const entityTypes: Array<Exclude<SearchEntityType, "all">> =
@@ -990,7 +1044,11 @@ async function fetchSearchResults(query: string, type: SearchEntityType) {
 
   const payloads = await Promise.all(entityTypes.map((entityType) => entityLoaders[entityType]()));
 
-  return payloads
+  const upstreamHasMore = payloads.some(
+    (payload) => getBoolean(payload, ["pagination", "has_more"]) === true,
+  );
+
+  const merged = payloads
     .flatMap((payload, index) =>
       getResponseItems(payload).map((record) => mapSearchResult(record, entityTypes[index])),
     )
@@ -999,27 +1057,57 @@ async function fetchSearchResults(query: string, type: SearchEntityType) {
       const leftName = left.name ?? "";
       const rightName = right.name ?? "";
       return leftName.localeCompare(rightName);
-    })
-    .slice(0, MAX_SEARCH_RESULTS);
+    });
+
+  const data = merged.slice(0, MAX_SEARCH_RESULTS);
+  const truncatedHere = merged.length > data.length;
+  return {
+    data,
+    meta: buildListMeta(data.length, MAX_SEARCH_RESULTS, upstreamHasMore || truncatedHere),
+  };
 }
 
 async function searchEntities(query: string, type: SearchEntityType) {
-  return jsonResponse(await fetchSearchResults(query, type));
+  const { data, meta } = await fetchSearchResults(query, type);
+  return jsonResponse(listResponse(data, meta));
 }
 
 async function fetchEntity(id: number, type: EntityType) {
   switch (type) {
     case "player": {
+      // teams.team brings the nested Team object so we can read team.type
+      // ("domestic" vs "national") without a second roundtrip per candidate.
       const payload = await apiRequest(`/players/${id}`, {
-        include: "position;nationality;teams",
+        include: "position;nationality;teams.team",
       });
       const player = getSingleResponseItem(payload, "Player");
-      const currentTeamReference = pickCurrentTeam(player);
-      const currentTeamId = getNumber(currentTeamReference, ["id"]);
-      const currentTeamPayload =
-        currentTeamId !== null ? await apiRequest(`/teams/${currentTeamId}`) : null;
-      const currentTeam =
-        currentTeamPayload !== null ? getSingleResponseItem(currentTeamPayload, "Current team") : null;
+      const candidates = orderedClubCandidates(player);
+
+      // Walk candidates club-first; if the candidate's type isn't visible in
+      // the relation, fetch /teams/{id} and check there. Skip national teams.
+      // In the common case (player on club + national team) this is one team
+      // fetch, same as before.
+      let currentTeam: unknown = null;
+      let currentTeamId: number | null = null;
+      for (const candidate of candidates) {
+        const candidateId =
+          getNumber(candidate, ["team_id"]) ??
+          getNumber(candidate, ["team", "id"]) ??
+          getNumber(candidate, ["id"]);
+        if (candidateId === null) continue;
+
+        const nestedType = (getString(candidate, ["team", "type"]) ?? "").toLowerCase();
+        if (nestedType === "national" || nestedType === "national_team") continue;
+
+        const teamPayload = await apiRequest(`/teams/${candidateId}`);
+        const team = getSingleResponseItem(teamPayload, "Current team");
+        const fetchedType = (getString(team, ["type"]) ?? "").toLowerCase();
+        if (fetchedType === "national" || fetchedType === "national_team") continue;
+
+        currentTeam = team;
+        currentTeamId = candidateId;
+        break;
+      }
 
       return {
         id: getNumber(player, ["id"]),
@@ -1047,13 +1135,18 @@ async function fetchEntity(id: number, type: EntityType) {
       };
     }
     case "league": {
-      const payload = await apiRequest(`/leagues/${id}`, { include: "country" });
+      const payload = await apiRequest(`/leagues/${id}`, { include: "country;currentseason" });
       const league = getSingleResponseItem(payload, "League");
+      const currentSeason = readPath(league, ["currentseason"]);
 
       return {
         id: getNumber(league, ["id"]),
         name: getPreferredName(league),
         country: getPreferredName(readPath(league, ["country"])),
+        current_season_id:
+          getNumber(currentSeason, ["id"]) ??
+          getNumber(league, ["current_season_id"]),
+        current_season_name: getPreferredName(currentSeason),
       };
     }
   }
@@ -1084,16 +1177,20 @@ async function fetchMatches(id: number, type: MatchEntityType, timeframe: MatchT
     }
 
     const payload = await apiRequest("/livescores/inplay", params);
-    return getResponseItems(payload)
-      .filter((record) =>
-        type === "league"
-          ? true
-          : toRecordArray(readPath(record, ["participants"])).some(
-              (participant) => getNumber(participant, ["id"]) === id,
-            ),
-      )
-      .slice(0, MAX_MATCH_RESULTS)
-      .map(mapMatch);
+    const upstreamHasMore = getBoolean(payload, ["pagination", "has_more"]);
+    const filtered = getResponseItems(payload).filter((record) =>
+      type === "league"
+        ? true
+        : toRecordArray(readPath(record, ["participants"])).some(
+            (participant) => getNumber(participant, ["id"]) === id,
+          ),
+    );
+    const data = filtered.slice(0, MAX_MATCH_RESULTS).map(mapMatch).filter(isUsableMatchRow);
+    const truncatedHere = filtered.length > data.length;
+    return {
+      data,
+      meta: buildListMeta(data.length, MAX_MATCH_RESULTS, upstreamHasMore === true || truncatedHere),
+    };
   }
 
   const today = startOfLocalDay();
@@ -1126,12 +1223,27 @@ async function fetchMatches(id: number, type: MatchEntityType, timeframe: MatchT
   }
 
   const payload = await apiRequest(endpoint, params);
-  return getResponseItems(payload).slice(0, MAX_MATCH_RESULTS).map(mapMatch);
+  const upstreamHasMore = getBoolean(payload, ["pagination", "has_more"]);
+  const items = getResponseItems(payload);
+  const data = items.slice(0, MAX_MATCH_RESULTS).map(mapMatch).filter(isUsableMatchRow);
+  const truncatedHere = items.length > data.length;
+  return {
+    data,
+    meta: buildListMeta(
+      data.length,
+      MAX_MATCH_RESULTS,
+      upstreamHasMore === true || truncatedHere,
+      { start: startDate, end: endDate },
+    ),
+  };
 }
 
 async function getMatches(id: number, type: MatchEntityType, timeframe: MatchTimeframe) {
-  return jsonResponse(await fetchMatches(id, type, timeframe));
+  const { data, meta } = await fetchMatches(id, type, timeframe);
+  return jsonResponse(listResponse(data, meta));
 }
+
+const SQUAD_PER_PAGE = 50;
 
 async function fetchSquad(teamId: number, seasonId?: number) {
   const endpoint =
@@ -1143,28 +1255,51 @@ async function fetchSquad(teamId: number, seasonId?: number) {
       ? "player;position;detailedPosition"
       : "player;position";
 
-  const payload = await apiRequest(endpoint, { include });
+  const payload = await apiRequest(endpoint, { include, per_page: SQUAD_PER_PAGE });
+  const upstreamHasMore = getBoolean(payload, ["pagination", "has_more"]);
 
-  return getResponseItems(payload).map((record) => {
+  const data = getResponseItems(payload).map((record) => {
     const player = toRecordArray(readPath(record, ["player"]))[0] ?? null;
     const position = readPath(record, ["position"]);
-    const detailedPosition = readPath(record, ["detailedPosition"]);
+    const detailedPosition =
+      readPath(record, ["detailedPosition"]) ?? readPath(record, ["detailedposition"]);
+
+    const positionId =
+      getNumber(position, ["id"]) ??
+      getNumber(record, ["position_id"]) ??
+      getNumber(player, ["position_id"]);
+    const detailedPositionId =
+      getNumber(detailedPosition, ["id"]) ??
+      getNumber(record, ["detailed_position_id"]) ??
+      getNumber(player, ["detailed_position_id"]);
 
     return {
       player_id: getNumber(player, ["id"]) ?? getNumber(record, ["player_id"]),
       name: getPreferredName(player) ?? getString(record, ["player_name"]),
-      position: getPreferredName(position),
-      detailed_position: getPreferredName(detailedPosition),
+      position:
+        getPreferredName(position) ??
+        (positionId !== null ? getTypeLookupLabel(positionId) : null),
+      position_id: positionId,
+      detailed_position:
+        getPreferredName(detailedPosition) ??
+        (detailedPositionId !== null ? getTypeLookupLabel(detailedPositionId) : null),
+      detailed_position_id: detailedPositionId,
       jersey_number:
         getNumber(record, ["jersey_number"]) ??
         getNumber(record, ["number"]) ??
         getNumber(player, ["jersey_number"]),
     };
   });
+
+  return {
+    data,
+    meta: buildListMeta(data.length, SQUAD_PER_PAGE, upstreamHasMore),
+  };
 }
 
 async function getSquad(teamId: number, seasonId?: number) {
-  return jsonResponse(await fetchSquad(teamId, seasonId));
+  const { data, meta } = await fetchSquad(teamId, seasonId);
+  return jsonResponse(listResponse(data, meta));
 }
 
 async function fetchMatchPreview(id: number) {
@@ -1232,7 +1367,21 @@ async function fetchFixtureDetails(
   fixtureId: number,
   includes: FixtureDetailInclude[],
 ) {
-  const includeValue = ["participants", "scores", "league", "state", ...includes].join(";");
+  // For lineups we want the player relation (so we can read the player's
+  // detailed_position_id and resolve a label via the types cache) and the
+  // position relation (broad position name). We also try lineups.detailedPosition
+  // defensively — Sportmonks silently ignores unsupported includes, and some
+  // plans/endpoints surface it directly on the lineup row. The mapper below
+  // reads both `detailedPosition` and `detailedposition` keys to handle either
+  // casing the upstream may emit.
+  // Source: https://docs.sportmonks.com/football/tutorials-and-guides/tutorials/includes/lineups
+  const expandedIncludes = includes.flatMap((entry) => {
+    if (entry === "lineups") {
+      return ["lineups.player", "lineups.position", "lineups.detailedPosition"];
+    }
+    return [entry];
+  });
+  const includeValue = ["participants", "scores", "league", "state", ...expandedIncludes].join(";");
   const payload = await apiRequest(`/fixtures/${fixtureId}`, {
     include: includeValue,
   });
@@ -1264,16 +1413,43 @@ async function fetchFixtureDetails(
     response.lineups = lineups.map((lineup) => {
       const player = toRecordArray(readPath(lineup, ["player"]))[0] ?? null;
       const position = readPath(lineup, ["position"]);
-      const detailedPosition = readPath(lineup, ["detailedPosition"]);
+      // Sportmonks has emitted detailedPosition under both camelCase and
+      // lowercase keys depending on plan/endpoint — read whichever is present.
+      const detailedPosition =
+        readPath(lineup, ["detailedPosition"]) ?? readPath(lineup, ["detailedposition"]);
+
+      const positionId =
+        getNumber(position, ["id"]) ??
+        getNumber(lineup, ["position_id"]) ??
+        getNumber(player, ["position_id"]);
+      // Lineup records don't carry detailed_position_id; the player record does.
+      const detailedPositionId =
+        getNumber(detailedPosition, ["id"]) ??
+        getNumber(player, ["detailed_position_id"]) ??
+        getNumber(lineup, ["detailed_position_id"]);
 
       return {
         player_id: getNumber(player, ["id"]) ?? getNumber(lineup, ["player_id"]),
         player_name: getPreferredName(player) ?? getString(lineup, ["player_name"]),
+        // team_id lets consumers split home vs away without inferring from order.
+        team_id: getNumber(lineup, ["team_id"]),
         jersey_number:
           getNumber(lineup, ["jersey_number"]) ??
           getNumber(lineup, ["number"]) ??
           getNumber(player, ["jersey_number"]),
-        position: getPreferredName(detailedPosition) ?? getPreferredName(position),
+        position:
+          getPreferredName(position) ??
+          (positionId !== null ? getTypeLookupLabel(positionId) : null),
+        position_id: positionId,
+        detailed_position:
+          getPreferredName(detailedPosition) ??
+          (detailedPositionId !== null ? getTypeLookupLabel(detailedPositionId) : null),
+        detailed_position_id: detailedPositionId,
+        // Formation fields are the match-specific position. formation_field is
+        // a grid coord like "1:1" (line:line_position); formation_position is
+        // 1-11 numeric placement. null for substitutes.
+        formation_field: getString(lineup, ["formation_field"]),
+        formation_position: getNumber(lineup, ["formation_position"]),
         type: getLineupType(lineup),
       };
     });
@@ -1343,18 +1519,68 @@ async function getFixtureDetails(fixtureId: number, includes: FixtureDetailInclu
   return jsonResponse(await fetchFixtureDetails(fixtureId, includes));
 }
 
+function isUsableStandingRow(row: ReturnType<typeof mapStanding>): boolean {
+  // The /standings/live endpoint returns a placeholder row of all-nulls when
+  // no live standings exist (typical for cup competitions in knockout phases
+  // or out-of-season leagues). Reject rows missing both a participant and a
+  // numeric position so the caller gets `[]` rather than a misleading row.
+  return row.team.id !== null || row.team.name !== null || row.position !== null;
+}
+
+const STANDINGS_PER_PAGE = 50;
+
 async function fetchStandings(leagueId: number) {
   await getEntityReference(leagueId, "league");
 
-  const payload = await apiRequest(`/standings/live/leagues/${leagueId}`, {
+  // Step 1: try live standings (works for in-progress league seasons). Pull a
+  // wide page so cup competitions with 36+ rows (e.g. Champions League league
+  // phase) come back complete without paging.
+  const livePayload = await apiRequest(`/standings/live/leagues/${leagueId}`, {
     include: "participant;details",
+    per_page: STANDINGS_PER_PAGE,
   });
+  const liveRows = getResponseItems(livePayload).map(mapStanding).filter(isUsableStandingRow);
+  if (liveRows.length > 0) {
+    const upstreamHasMore = getBoolean(livePayload, ["pagination", "has_more"]);
+    return {
+      data: liveRows,
+      meta: buildListMeta(liveRows.length, STANDINGS_PER_PAGE, upstreamHasMore),
+    };
+  }
 
-  return getResponseItems(payload).map(mapStanding);
+  // Step 2: live empty (cup competition / between matches / off-season).
+  // Fall back to season-based standings using the league's current season.
+  const leaguePayload = await apiRequest(`/leagues/${leagueId}`, {
+    include: "currentseason",
+  });
+  const league = getSingleResponseItem(leaguePayload, "League");
+  const currentSeasonId =
+    getNumber(league, ["currentseason", "id"]) ??
+    getNumber(league, ["current_season_id"]) ??
+    getNumber(league, ["currentSeason", "id"]);
+
+  if (currentSeasonId === null) {
+    return {
+      data: [],
+      meta: buildListMeta(0, STANDINGS_PER_PAGE, false),
+    };
+  }
+
+  const seasonPayload = await apiRequest(`/standings/seasons/${currentSeasonId}`, {
+    include: "participant;details",
+    per_page: STANDINGS_PER_PAGE,
+  });
+  const seasonRows = getResponseItems(seasonPayload).map(mapStanding).filter(isUsableStandingRow);
+  const upstreamHasMore = getBoolean(seasonPayload, ["pagination", "has_more"]);
+  return {
+    data: seasonRows,
+    meta: buildListMeta(seasonRows.length, STANDINGS_PER_PAGE, upstreamHasMore),
+  };
 }
 
 async function getStandings(leagueId: number) {
-  return jsonResponse(await fetchStandings(leagueId));
+  const { data, meta } = await fetchStandings(leagueId);
+  return jsonResponse(listResponse(data, meta));
 }
 
 async function fetchHistoricSeasons(leagueId: number) {
@@ -1398,7 +1624,9 @@ async function fetchTopscorers(
     order: "asc",
   });
 
-  return getResponseItems(payload).slice(0, limit).map((record) => {
+  const upstreamHasMore = getBoolean(payload, ["pagination", "has_more"]);
+  const items = getResponseItems(payload);
+  const data = items.slice(0, limit).map((record) => {
     const player = toRecordArray(readPath(record, ["player"]))[0] ?? null;
     const team = toRecordArray(readPath(record, ["participant"]))[0] ?? null;
 
@@ -1415,6 +1643,11 @@ async function fetchTopscorers(
       total: getNumber(record, ["total"]),
     };
   });
+  const truncatedHere = items.length > data.length;
+  return {
+    data,
+    meta: buildListMeta(data.length, limit, upstreamHasMore === true || truncatedHere),
+  };
 }
 
 async function getTopscorers(
@@ -1422,16 +1655,26 @@ async function getTopscorers(
   type: TopscorerType,
   limit: number,
 ) {
-  return jsonResponse(await fetchTopscorers(seasonId, type, limit));
+  const { data, meta } = await fetchTopscorers(seasonId, type, limit);
+  return jsonResponse(listResponse(data, meta));
 }
 
 async function getEntityReference(id: number, type: MatchEntityType) {
-  if (type === "team") {
-    await apiRequest(`/teams/${id}`);
-    return;
+  // Sportmonks doesn't reliably 404 on unknown ids — depending on plan it can
+  // return 200 with `data: []`, `data: {}`, or `data: {/* placeholder with no id */}`.
+  // We verify the result actually contains an entity with a numeric `id`;
+  // anything else surfaces as `not_found` with a clear how-to-fix message.
+  const path = type === "team" ? `/teams/${id}` : `/leagues/${id}`;
+  const label = type === "team" ? "Team" : "League";
+  const payload = await apiRequest(path);
+  const item = getSingleResponseItem(payload, label);
+  if (getNumber(item, ["id"]) === null) {
+    throw new SportmonksToolError(
+      "not_found",
+      `${label} ${id} was not found in Sportmonks.`,
+      `Verify the id is correct and available in your Sportmonks subscription. Use the 'search' tool to find a valid id.`,
+    );
   }
-
-  await apiRequest(`/leagues/${id}`);
 }
 
 // ── Tool Definitions ─────────────────────────────────────────────────────────
@@ -1634,7 +1877,8 @@ const tools: ToolDefinition[] = [
   },
   {
     name: "get_standings",
-    description: "Get the live league standings for a Sportmonks league id.",
+    description:
+      "Get the standings table for a Sportmonks league id. Tries the live endpoint first; if it returns nothing (cup competitions in knockout phases, between matchdays, or out-of-season leagues), falls back to season-based standings using the league's current season.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1875,7 +2119,7 @@ const prompts: PromptDefinition[] = [
       const teamId = requirePositiveInteger(args.team_id, "team_id");
 
       const entity = await fetchEntity(teamId, "team");
-      const matches = await fetchMatches(teamId, "team", "upcoming");
+      const { data: matches } = await fetchMatches(teamId, "team", "upcoming");
 
       const lines: string[] = [
         "Use the Sportmonks data below to write a concise team overview. Do not invent facts that are not present.",
@@ -1896,7 +2140,7 @@ const prompts: PromptDefinition[] = [
         const firstLeagueId = matches[0].league?.id;
         if (typeof firstLeagueId === "number") {
           try {
-            const standings = await fetchStandings(firstLeagueId);
+            const { data: standings } = await fetchStandings(firstLeagueId);
             const row = findStandingRow(standings, teamId);
             if (row) {
               lines.push("", `League Standing (${matches[0].league?.name}):`, `  ${formatStandingRow(row)}`);
@@ -1938,11 +2182,13 @@ const prompts: PromptDefinition[] = [
     async handler(args) {
       const leagueId = requirePositiveInteger(args.league_id, "league_id");
 
-      const [entity, standings, matches] = await Promise.all([
+      const [entity, standingsEnvelope, matchesEnvelope] = await Promise.all([
         fetchEntity(leagueId, "league"),
         fetchStandings(leagueId),
         fetchMatches(leagueId, "league", "upcoming"),
       ]);
+      const standings = standingsEnvelope.data;
+      const matches = matchesEnvelope.data;
 
       const lines: string[] = [
         "Use the Sportmonks data below to write a concise league overview. Do not invent facts that are not present.",
@@ -1957,7 +2203,7 @@ const prompts: PromptDefinition[] = [
           lines.push(`  ${formatStandingRow(row)}`);
         }
       } else {
-        lines.push("", "Standings: No live standings returned by Sportmonks.");
+        lines.push("", "Standings: No standings available from Sportmonks for this league right now.");
       }
 
       if (matches.length > 0) {

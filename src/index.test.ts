@@ -307,17 +307,18 @@ describe("Tool Handlers", () => {
     const result = await toolMap.get("search")!.handler({ query: "ars" });
     const parsed = parseToolJson(result);
 
-    expect(parsed).toEqual([
+    expect(parsed.data).toEqual([
       { id: 3, entity_type: "team", name: "Arsenal" },
       { id: 1, entity_type: "league", name: "Premier League" },
       { id: 2, entity_type: "player", name: "Zed Player" },
     ]);
+    expect(parsed.meta).toMatchObject({ returned: 3, cap: MAX_SEARCH_RESULTS, possibly_more: false });
 
     expect(globalThis.fetch).toHaveBeenCalledTimes(3);
 
     const firstUrl = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
     expect(firstUrl.pathname).toBe("/v3/football/players/search/ars");
-    expect(firstUrl.searchParams.get("per_page")).toBe(String(MAX_SEARCH_RESULTS));
+    expect(Number(firstUrl.searchParams.get("per_page"))).toBeGreaterThanOrEqual(MAX_SEARCH_RESULTS);
   });
 
   it("search uses a single exact endpoint when a specific type is provided", async () => {
@@ -328,7 +329,8 @@ describe("Tool Handlers", () => {
     const result = await toolMap.get("search")!.handler({ query: "Arsenal", type: "team" });
     const parsed = parseToolJson(result);
 
-    expect(parsed).toEqual([{ id: 14, entity_type: "team", name: "Arsenal" }]);
+    expect(parsed.data).toEqual([{ id: 14, entity_type: "team", name: "Arsenal" }]);
+    expect(parsed.meta).toMatchObject({ returned: 1, cap: MAX_SEARCH_RESULTS, possibly_more: false });
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
 
     const calledUrl = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
@@ -401,6 +403,7 @@ describe("Tool Handlers", () => {
         id: 501,
         name: "Premiership",
         country: { name: "Scotland" },
+        currentseason: { id: 25583, name: "2025/2026" },
       },
     });
 
@@ -411,11 +414,13 @@ describe("Tool Handlers", () => {
       id: 501,
       name: "Premiership",
       country: "Scotland",
+      current_season_id: 25583,
+      current_season_name: "2025/2026",
     });
 
     const calledUrl = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
     expect(calledUrl.pathname).toBe("/v3/football/leagues/501");
-    expect(calledUrl.searchParams.get("include")).toBe("country");
+    expect(calledUrl.searchParams.get("include")).toBe("country;currentseason");
   });
 
   it("get_squad uses the current squad endpoint and maps current squad fields", async () => {
@@ -434,15 +439,18 @@ describe("Tool Handlers", () => {
     const result = await toolMap.get("get_squad")!.handler({ team_id: 14 });
     const parsed = parseToolJson(result);
 
-    expect(parsed).toEqual([
+    expect(parsed.data).toEqual([
       {
         player_id: 10,
         name: "Bukayo Saka",
         position: "Forward",
+        position_id: null,
         detailed_position: "Right Wing",
+        detailed_position_id: null,
         jersey_number: 7,
       },
     ]);
+    expect(parsed.meta).toMatchObject({ returned: 1, possibly_more: false });
 
     const calledUrl = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
     expect(calledUrl.pathname).toBe("/v3/football/squads/teams/14");
@@ -464,15 +472,18 @@ describe("Tool Handlers", () => {
     const result = await toolMap.get("get_squad")!.handler({ team_id: 14, season_id: 2024 });
     const parsed = parseToolJson(result);
 
-    expect(parsed).toEqual([
+    expect(parsed.data).toEqual([
       {
         player_id: 11,
         name: "Martin Odegaard",
         position: "Midfielder",
+        position_id: null,
         detailed_position: null,
+        detailed_position_id: null,
         jersey_number: 8,
       },
     ]);
+    expect(parsed.meta).toMatchObject({ returned: 1, possibly_more: false });
 
     const calledUrl = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
     expect(calledUrl.pathname).toBe("/v3/football/squads/seasons/2024/teams/14");
@@ -506,7 +517,7 @@ describe("Tool Handlers", () => {
     const result = await toolMap.get("get_matches")!.handler({ id: 14, type: "team" });
     const parsed = parseToolJson(result);
 
-    expect(parsed).toEqual([
+    expect(parsed.data).toEqual([
       {
         id: 1001,
         home_team: "Arsenal",
@@ -516,6 +527,7 @@ describe("Tool Handlers", () => {
         league: { id: 8, name: "Premier League" },
       },
     ]);
+    expect(parsed.meta).toMatchObject({ returned: 1, cap: MAX_MATCH_RESULTS, possibly_more: false });
 
     const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
     const calledUrl = new URL(fetchMock.mock.calls[1][0]);
@@ -554,7 +566,7 @@ describe("Tool Handlers", () => {
     });
     const parsed = parseToolJson(result);
 
-    expect(parsed).toEqual([
+    expect(parsed.data).toEqual([
       {
         id: 2001,
         home_team: "Celtic",
@@ -564,6 +576,7 @@ describe("Tool Handlers", () => {
         league: { id: 501, name: "Premiership" },
       },
     ]);
+    expect(parsed.meta).toMatchObject({ returned: 1, cap: MAX_MATCH_RESULTS, possibly_more: false });
 
     const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
     const calledUrl = new URL(fetchMock.mock.calls[1][0]);
@@ -727,8 +740,14 @@ describe("Tool Handlers", () => {
         {
           player_id: 160208,
           player_name: "Alejandro Grimaldo",
+          team_id: null,
           jersey_number: 20,
           position: "Defender",
+          position_id: null,
+          detailed_position: null,
+          detailed_position_id: null,
+          formation_field: null,
+          formation_position: null,
           type: "lineup",
         },
       ],
@@ -757,7 +776,7 @@ describe("Tool Handlers", () => {
     const calledUrl = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
     expect(calledUrl.pathname).toBe("/v3/football/fixtures/2001");
     expect(calledUrl.searchParams.get("include")).toBe(
-      "participants;scores;league;state;lineups;events;statistics",
+      "participants;scores;league;state;lineups.player;lineups.position;lineups.detailedPosition;events;statistics",
     );
   });
 
@@ -832,7 +851,7 @@ describe("Tool Handlers", () => {
     });
     const parsed = parseToolJson(result);
 
-    expect(parsed).toEqual([
+    expect(parsed.data).toEqual([
       {
         position: 1,
         player: { id: 160208, name: "Alejandro Grimaldo" },
@@ -840,6 +859,7 @@ describe("Tool Handlers", () => {
         total: 20,
       },
     ]);
+    expect(parsed.meta).toMatchObject({ returned: 1, cap: 5, possibly_more: false });
 
     const calledUrl = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
     expect(calledUrl.pathname).toBe("/v3/football/topscorers/seasons/2024");
@@ -876,7 +896,7 @@ describe("Tool Handlers", () => {
     const result = await toolMap.get("get_standings")!.handler({ id: 501 });
     const parsed = parseToolJson(result);
 
-    expect(parsed).toEqual([
+    expect(parsed.data).toEqual([
       {
         position: 1,
         team: { id: 53, name: "Celtic" },
@@ -888,12 +908,14 @@ describe("Tool Handlers", () => {
         points: 80,
       },
     ]);
+    expect(parsed.meta).toMatchObject({ returned: 1, possibly_more: false });
 
     const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
     const standingsUrl = new URL(fetchMock.mock.calls[1][0]);
 
     expect(standingsUrl.pathname).toBe("/v3/football/standings/live/leagues/501");
     expect(standingsUrl.searchParams.get("include")).toBe("participant;details");
+    expect(Number(standingsUrl.searchParams.get("per_page"))).toBeGreaterThanOrEqual(36);
   });
 });
 
