@@ -917,6 +917,97 @@ describe("Tool Handlers", () => {
     expect(standingsUrl.searchParams.get("include")).toBe("participant;details");
     expect(Number(standingsUrl.searchParams.get("per_page"))).toBeGreaterThanOrEqual(36);
   });
+
+  it("get_standings falls back to season standings when live returns 404", async () => {
+    globalThis.fetch = mockFetchJson(
+      // 1. getEntityReference → /leagues/501
+      { data: { id: 501, name: "Premiership" } },
+      // 2. live standings → 404 ("No result(s) found... or no subscription access")
+      {
+        status: 404,
+        data: {
+          message:
+            "No result(s) found matching your request. Either the query did not return any results or you don't have access to it via your current subscription.",
+        },
+      },
+      // 3. fallback → /leagues/501?include=currentseason
+      {
+        data: {
+          id: 501,
+          name: "Premiership",
+          currentseason: { id: 23456, name: "2025/2026" },
+        },
+      },
+      // 4. /standings/seasons/23456
+      {
+        data: [
+          {
+            position: 1,
+            points: 80,
+            participant: { id: 53, name: "Celtic" },
+            details: [
+              { type_id: 129, value: 32 },
+              { type_id: 130, value: 26 },
+              { type_id: 131, value: 2 },
+              { type_id: 132, value: 4 },
+              { type_id: 179, value: 45 },
+              { type_id: 187, value: 80 },
+            ],
+          },
+        ],
+      },
+    );
+
+    const result = await toolMap.get("get_standings")!.handler({ id: 501 });
+    const parsed = parseToolJson(result);
+
+    expect(parsed.data).toEqual([
+      {
+        position: 1,
+        team: { id: 53, name: "Celtic" },
+        played: 32,
+        won: 26,
+        drawn: 2,
+        lost: 4,
+        gd: 45,
+        points: 80,
+      },
+    ]);
+    expect(parsed.meta).toMatchObject({ returned: 1, possibly_more: false });
+
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+
+    const livePath = new URL(fetchMock.mock.calls[1][0]).pathname;
+    const fallbackLeaguePath = new URL(fetchMock.mock.calls[2][0]).pathname;
+    const fallbackLeagueIncludes = new URL(fetchMock.mock.calls[2][0]).searchParams.get("include");
+    const seasonPath = new URL(fetchMock.mock.calls[3][0]).pathname;
+
+    expect(livePath).toBe("/v3/football/standings/live/leagues/501");
+    expect(fallbackLeaguePath).toBe("/v3/football/leagues/501");
+    expect(fallbackLeagueIncludes).toBe("currentseason");
+    expect(seasonPath).toBe("/v3/football/standings/seasons/23456");
+  });
+
+  it("get_standings still surfaces non-404 errors from the live endpoint", async () => {
+    globalThis.fetch = mockFetchJson(
+      // 1. getEntityReference → /leagues/501
+      { data: { id: 501, name: "Premiership" } },
+      // 2. live standings → 401 (auth error must NOT be swallowed by fallback)
+      {
+        status: 401,
+        data: { message: "Unauthenticated." },
+      },
+    );
+
+    const handler = toolMap.get("get_standings")!.handler;
+    await expect(handler({ id: 501 })).rejects.toMatchObject({
+      kind: "authentication_error",
+    });
+
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("Validation", () => {

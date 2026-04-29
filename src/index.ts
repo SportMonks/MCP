@@ -48,7 +48,7 @@ Behavior Notes
 - Single-entity tools (get_player, get_team, get_league, get_match_preview, get_fixture_details,
   get_historic_seasons) return a JSON object or array directly, without an envelope.
 - Validation errors explain what is wrong and how to fix the request.
-- Search returns at most 10 results; meta.possibly_more flags when more matched upstream.
+- Search returns at most 25 results; meta.possibly_more flags when more matched upstream.
 - All types and states are fetched on startup and used to build shared mappings.
 - get_player uses the exact two-step player/team lookup flow to resolve the current team name.
 - get_matches limits output to:
@@ -468,6 +468,8 @@ async function apiRequest(
     }
   }
 
+  logUpstreamUrl(url);
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
 
@@ -629,6 +631,25 @@ function resolveLogFilePath() {
 }
 
 const LOG_FILE_PATH = resolveLogFilePath();
+
+function isTruthyEnvFlag(value: string | undefined) {
+  if (value === undefined) return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+}
+
+const DEBUG_URLS = isTruthyEnvFlag(process.env.SPORTMONKS_DEBUG_URLS);
+
+function logUpstreamUrl(url: URL) {
+  if (!DEBUG_URLS) return;
+  // Always strip the API token before writing — these lines may end up in
+  // stderr captures, support tickets, or shared screenshots.
+  const redacted = new URL(url.toString());
+  if (redacted.searchParams.has("api_token")) {
+    redacted.searchParams.set("api_token", "REDACTED");
+  }
+  process.stderr.write(`[sportmonks] GET ${redacted.toString()}\n`);
+}
 
 interface ToolCallLogEntry {
   ts: string;
@@ -1519,9 +1540,8 @@ async function getFixtureDetails(fixtureId: number, includes: FixtureDetailInclu
 
 function isUsableStandingRow(row: ReturnType<typeof mapStanding>): boolean {
   // The /standings/live endpoint returns a placeholder row of all-nulls when
-  // no live standings exist (typical for cup competitions in knockout phases
-  // or out-of-season leagues). Reject rows missing both a participant and a
-  // numeric position so the caller gets `[]` rather than a misleading row.
+  // no live standings are available. Reject rows missing both a participant
+  // and a numeric position so the caller gets `[]` rather than a misleading row.
   return row.team.id !== null || row.team.name !== null || row.position !== null;
 }
 
@@ -1530,24 +1550,35 @@ const STANDINGS_PER_PAGE = 50;
 async function fetchStandings(leagueId: number) {
   await getEntityReference(leagueId, "league");
 
-  // Step 1: try live standings (works for in-progress league seasons). Pull a
-  // wide page so cup competitions with 36+ rows (e.g. Champions League league
-  // phase) come back complete without paging.
-  const livePayload = await apiRequest(`/standings/live/leagues/${leagueId}`, {
-    include: "participant;details",
-    per_page: STANDINGS_PER_PAGE,
-  });
-  const liveRows = getResponseItems(livePayload).map(mapStanding).filter(isUsableStandingRow);
+  // Step 1: try live standings. Pull a wide page so competitions with 36+ rows
+  // (e.g. Champions League league phase) come back complete without paging.
+  // Sportmonks may return either 200 with an empty/placeholder list or 404
+  // when no live standings are available; treat both as "fall through to the
+  // season-based fallback" rather than surfacing 404 as a terminal error.
+  let liveRows: ReturnType<typeof mapStanding>[] = [];
+  let liveUpstreamHasMore: boolean | null = null;
+  try {
+    const livePayload = await apiRequest(`/standings/live/leagues/${leagueId}`, {
+      include: "participant;details",
+      per_page: STANDINGS_PER_PAGE,
+    });
+    liveRows = getResponseItems(livePayload).map(mapStanding).filter(isUsableStandingRow);
+    liveUpstreamHasMore = getBoolean(livePayload, ["pagination", "has_more"]);
+  } catch (error) {
+    if (!(error instanceof SportmonksToolError) || error.kind !== "not_found") {
+      throw error;
+    }
+  }
+
   if (liveRows.length > 0) {
-    const upstreamHasMore = getBoolean(livePayload, ["pagination", "has_more"]);
     return {
       data: liveRows,
-      meta: buildListMeta(liveRows.length, STANDINGS_PER_PAGE, upstreamHasMore),
+      meta: buildListMeta(liveRows.length, STANDINGS_PER_PAGE, liveUpstreamHasMore),
     };
   }
 
-  // Step 2: live empty (cup competition / between matches / off-season).
-  // Fall back to season-based standings using the league's current season.
+  // Step 2: live returned nothing. Fall back to season-based standings using
+  // the league's current season.
   const leaguePayload = await apiRequest(`/leagues/${leagueId}`, {
     include: "currentseason",
   });
@@ -1876,7 +1907,7 @@ const tools: ToolDefinition[] = [
   {
     name: "get_standings",
     description:
-      "Get the standings table for a Sportmonks league id. Tries the live endpoint first; if it returns nothing (cup competitions in knockout phases, between matchdays, or out-of-season leagues), falls back to season-based standings using the league's current season.",
+      "Get the standings table for a Sportmonks league id. Tries the live endpoint first; if no live standings are returned, falls back to season-based standings using the league's current season.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1968,6 +1999,7 @@ async function fetchOpenApiSpec() {
   const timeout = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
 
   try {
+    logUpstreamUrl(new URL(OPENAPI_SPEC_URL));
     const response = await fetch(OPENAPI_SPEC_URL, { signal: controller.signal });
 
     if (!response.ok) {
