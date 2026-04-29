@@ -70,7 +70,7 @@ Official References
 `.trim();
 
 const SPORTMONKS_SERVER_VERSION = "1.2.0";
-const MAX_SEARCH_RESULTS = 10;
+const MAX_SEARCH_RESULTS = 25;
 const MAX_MATCH_RESULTS = 20;
 const UPCOMING_WINDOW_DAYS = 14;
 const HISTORIC_WINDOW_DAYS = 30;
@@ -902,10 +902,14 @@ function getStatisticValue(statistic: unknown): unknown {
 }
 
 function mapSearchResult(record: unknown, entityType: Exclude<SearchEntityType, "all">) {
+  // Country lets the LLM disambiguate generic names — e.g. ~12 leagues named
+  // "Super League" are otherwise indistinguishable. Just the country name is
+  // enough; we don't include the nested country object.
   return {
     id: getNumber(record, ["id"]),
     entity_type: entityType,
     name: getPreferredName(record),
+    country: getPreferredName(readPath(record, ["country"])),
   };
 }
 
@@ -1032,11 +1036,12 @@ function mapStanding(record: unknown) {
 async function fetchSearchResults(query: string, type: SearchEntityType) {
   // Pull a wider page than we expose so we can detect upstream truncation via
   // pagination.has_more, then trim back to MAX_SEARCH_RESULTS.
-  const upstreamPerPage = Math.max(MAX_SEARCH_RESULTS * 5, 50);
+  const upstreamPerPage = Math.max(MAX_SEARCH_RESULTS * 2, 50);
+  const baseParams = { per_page: upstreamPerPage, include: "country" };
   const entityLoaders: Record<Exclude<SearchEntityType, "all">, () => Promise<unknown>> = {
-    player: () => apiRequest(`/players/search/${encodeURIComponent(query)}`, { per_page: upstreamPerPage }),
-    team: () => apiRequest(`/teams/search/${encodeURIComponent(query)}`, { per_page: upstreamPerPage }),
-    league: () => apiRequest(`/leagues/search/${encodeURIComponent(query)}`, { per_page: upstreamPerPage }),
+    player: () => apiRequest(`/players/search/${encodeURIComponent(query)}`, baseParams),
+    team: () => apiRequest(`/teams/search/${encodeURIComponent(query)}`, baseParams),
+    league: () => apiRequest(`/leagues/search/${encodeURIComponent(query)}`, baseParams),
   };
 
   const entityTypes: Array<Exclude<SearchEntityType, "all">> =
@@ -1440,16 +1445,9 @@ async function fetchFixtureDetails(
         position:
           getPreferredName(position) ??
           (positionId !== null ? getTypeLookupLabel(positionId) : null),
-        position_id: positionId,
         detailed_position:
           getPreferredName(detailedPosition) ??
           (detailedPositionId !== null ? getTypeLookupLabel(detailedPositionId) : null),
-        detailed_position_id: detailedPositionId,
-        // Formation fields are the match-specific position. formation_field is
-        // a grid coord like "1:1" (line:line_position); formation_position is
-        // 1-11 numeric placement. null for substitutes.
-        formation_field: getString(lineup, ["formation_field"]),
-        formation_position: getNumber(lineup, ["formation_position"]),
         type: getLineupType(lineup),
       };
     });

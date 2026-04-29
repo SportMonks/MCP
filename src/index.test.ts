@@ -308,9 +308,9 @@ describe("Tool Handlers", () => {
     const parsed = parseToolJson(result);
 
     expect(parsed.data).toEqual([
-      { id: 3, entity_type: "team", name: "Arsenal" },
-      { id: 1, entity_type: "league", name: "Premier League" },
-      { id: 2, entity_type: "player", name: "Zed Player" },
+      { id: 3, entity_type: "team", name: "Arsenal", country: null },
+      { id: 1, entity_type: "league", name: "Premier League", country: null },
+      { id: 2, entity_type: "player", name: "Zed Player", country: null },
     ]);
     expect(parsed.meta).toMatchObject({ returned: 3, cap: MAX_SEARCH_RESULTS, possibly_more: false });
 
@@ -319,22 +319,26 @@ describe("Tool Handlers", () => {
     const firstUrl = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
     expect(firstUrl.pathname).toBe("/v3/football/players/search/ars");
     expect(Number(firstUrl.searchParams.get("per_page"))).toBeGreaterThanOrEqual(MAX_SEARCH_RESULTS);
+    expect(firstUrl.searchParams.get("include")).toBe("country");
   });
 
   it("search uses a single exact endpoint when a specific type is provided", async () => {
     globalThis.fetch = mockFetchJson({
-      data: [{ id: 14, name: "Arsenal" }],
+      data: [{ id: 14, name: "Arsenal", country: { name: "England" } }],
     });
 
     const result = await toolMap.get("search")!.handler({ query: "Arsenal", type: "team" });
     const parsed = parseToolJson(result);
 
-    expect(parsed.data).toEqual([{ id: 14, entity_type: "team", name: "Arsenal" }]);
+    expect(parsed.data).toEqual([
+      { id: 14, entity_type: "team", name: "Arsenal", country: "England" },
+    ]);
     expect(parsed.meta).toMatchObject({ returned: 1, cap: MAX_SEARCH_RESULTS, possibly_more: false });
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
 
     const calledUrl = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
     expect(calledUrl.pathname).toBe("/v3/football/teams/search/Arsenal");
+    expect(calledUrl.searchParams.get("include")).toBe("country");
   });
 
   it("get_player delegates to the exact player entity flow", async () => {
@@ -743,11 +747,7 @@ describe("Tool Handlers", () => {
           team_id: null,
           jersey_number: 20,
           position: "Defender",
-          position_id: null,
           detailed_position: null,
-          detailed_position_id: null,
-          formation_field: null,
-          formation_position: null,
           type: "lineup",
         },
       ],
