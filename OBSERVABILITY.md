@@ -90,14 +90,14 @@ When `error_kind` is `upstream_error` or `not_found`, use this to know which Spo
 | `search` | `/football/players/search/{q}`, `/football/teams/search/{q}`, `/football/leagues/search/{q}` |
 | `get_player` | `/football/players/{id}?include=position;nationality;teams` + `/football/teams/{team_id}` |
 | `get_team` | `/football/teams/{id}?include=venue;country` |
-| `get_league` | `/football/leagues/{id}?include=country` |
+| `get_league` | `/football/leagues/{id}?include=country;currentseason` |
 | `get_squad` | `/football/squads/teams/{team_id}` or `/football/squads/seasons/{season_id}/teams/{team_id}` |
 | `get_matches` (upcoming/historic, team) | `/football/fixtures/between/{start}/{end}/{team_id}` |
 | `get_matches` (upcoming/historic, league) | `/football/fixtures/between/{start}/{end}` + `fixtureLeagues:{id}` filter |
 | `get_matches` (live) | `/football/livescores/inplay` |
 | `get_match_preview` | `/football/fixtures/{id}` + `/football/fixtures/head-to-head/{a}/{b}` |
 | `get_fixture_details` | `/football/fixtures/{id}` |
-| `get_standings` | `/football/standings/live/leagues/{id}` |
+| `get_standings` | `/football/standings/live/leagues/{id}` first; on empty/404, falls back to `/football/leagues/{id}?include=currentseason` then `/football/standings/seasons/{current_season_id}` |
 | `get_historic_seasons` | `/football/leagues/{id}?include=seasons` |
 | `get_topscorers` | `/football/topscorers/seasons/{id}` |
 
@@ -122,3 +122,4 @@ Then send a `tools/call` from your MCP client and inspect `mcp-debug.log`.
 | --- | --- | --- | --- |
 | `SPORTMONKS_API_TOKEN` | Yes | — | Sportmonks API token |
 | `SPORTMONKS_LOG_FILE` | No | `<os.tmpdir()>/sportmonks-football-mcp.log` | Absolute path for the local log file. Set to `off`, `none`, or empty to disable file logging |
+| `SPORTMONKS_DEBUG_URLS` | No | `off` | Set to `1`, `true`, `yes`, or `on` to log every outbound Sportmonks URL to stderr (with `api_token` redacted). Useful for confirming which endpoint actually served a response (e.g. live vs. season fallback in `get_standings`) |

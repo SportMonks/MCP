@@ -10,9 +10,11 @@ This server exposes focused Sportmonks Football API tools for search, player/tea
 - Typed input schemas plus runtime validation on every tool
 - JSON output for every tool response, including error responses
 - Descriptive errors with a `how_to_fix` field for the LLM
+- Pagination metadata (`returned`, `cap`, `possibly_more`, `date_window`) on every list-style tool so the LLM knows when results were truncated
 - Built on official Sportmonks Football API 3.0 endpoints
-- Exact two-step player lookup for current team resolution: player by id, then team by id
-- Types and states are loaded on startup and reused for shared mappings
+- Player current-team resolution iterates candidate clubs and rejects national-team relations, so `current_team` returns the player's club rather than their country
+- Invalid league/team ids surface as typed `not_found` errors instead of empty rows
+- Types and states are loaded on startup and reused for shared mappings (broad and detailed positions are resolved to readable names via this cache)
 
 ## Configuration
 
@@ -20,6 +22,7 @@ This server exposes focused Sportmonks Football API tools for search, player/tea
 | --- | --- | --- | --- |
 | `SPORTMONKS_API_TOKEN` | Yes | — | Your Sportmonks API token from MySportmonks |
 | `SPORTMONKS_LOG_FILE` | No | `<os.tmpdir()>/sportmonks-football-mcp.log` | Absolute path for the local tool-call log. Set to `off`, `none`, or empty to disable file logging |
+| `SPORTMONKS_DEBUG_URLS` | No | `off` | Set to `1`, `true`, `yes`, or `on` to log each outbound Sportmonks URL to stderr (with `api_token` redacted). Off by default |
 
 Sportmonks authentication follows the official `api_token` query parameter approach documented at https://docs.sportmonks.com/v3/welcome/authentication.
 
@@ -97,6 +100,12 @@ Point your MCP client at the compiled entrypoint (`node /absolute/path/to/dist/i
 
 ## Available Tools
 
+### Response shapes
+
+List-style tools (`search`, `get_matches`, `get_squad`, `get_standings`, `get_topscorers`) return a `{ data, meta }` envelope where `meta` contains `returned`, `cap`, and `possibly_more`. Use `meta.possibly_more` to detect upstream or local truncation. `get_matches` also exposes `meta.date_window` for non-live timeframes.
+
+Single-entity tools (`get_player`, `get_team`, `get_league`, `get_match_preview`, `get_fixture_details`) and `get_historic_seasons` return a JSON object or array directly without an envelope.
+
 ### `search`
 
 Search for entities in the Sportmonks database.
@@ -106,8 +115,8 @@ Inputs:
 - `type` (optional): `player`, `team`, `league`, `all` (default)
 
 Output:
-- JSON array with up to 10 items
-- Each item contains `id`, `entity_type`, and `name`
+- `{ data, meta }` envelope; `data` contains up to 25 items sorted alphabetically by name
+- Each item contains `id`, `entity_type`, `name`, and `country` (`country` may be `null` when Sportmonks doesn't provide one; useful for disambiguating generic names like the dozen leagues called "Super League")
 
 ### `get_player`
 
@@ -137,7 +146,7 @@ Inputs:
 - `id` (required)
 
 Output:
-- JSON object with `id`, `name`, and `country`
+- JSON object with `id`, `name`, `country`, `current_season_id`, and `current_season_name`
 
 ### `get_squad`
 
@@ -148,7 +157,7 @@ Inputs:
 - `season_id` (optional)
 
 Output:
-- JSON array with `player_id`, `name`, `position`, `detailed_position`, and `jersey_number`
+- `{ data, meta }` envelope; each row contains `player_id`, `name`, `position`, `position_id`, `detailed_position`, `detailed_position_id`, and `jersey_number`
 
 ### `get_matches`
 
@@ -160,8 +169,8 @@ Inputs:
 - `timeframe` (optional): `live`, `historic`, `upcoming` (default)
 
 Output:
-- JSON array
-- Each match contains `id`, `home_team`, `away_team`, `starting_at`, `state`, and `league`
+- `{ data, meta }` envelope; each match contains `id`, `home_team`, `away_team`, `starting_at`, `state`, and `league`
+- For `upcoming` and `historic` timeframes, `meta.date_window` reports the `{ start, end }` range queried
 
 Built-in limits:
 - `upcoming`: next 14 days, max 20 fixtures
@@ -192,18 +201,19 @@ Inputs:
 
 Output:
 - Base fixture object always includes `id`, `home_team`, `away_team`, `starting_at`, `state`, `league`, and `scores`
-- Optional sections include `lineups`, `events`, and `statistics`
+- `lineups` (when requested): each row contains `player_id`, `player_name`, `team_id`, `jersey_number`, `position`, `detailed_position`, and `type` (`lineup` or `bench`). `team_id` lets you split home vs away without inferring from order
+- `events` (when requested): each event contains `minute`, `type`, `player_name`, `related_player_name`, `result`, and `info`
+- `statistics` (when requested): grouped per team with `team_id`, `team_name`, and a `stats` object keyed by stat name
 
 ### `get_standings`
 
-Get live standings for a league.
+Get the standings table for a league. Tries the live endpoint first; if no live standings are returned (including 404 responses for competitions between phases), falls back to season-based standings using the league's current season.
 
 Inputs:
 - `id` (required)
 
 Output:
-- JSON array
-- Each standing row contains `position`, `team`, `played`, `won`, `drawn`, `lost`, `gd`, and `points`
+- `{ data, meta }` envelope; each standing row contains `position`, `team`, `played`, `won`, `drawn`, `lost`, `gd`, and `points`
 
 ### `get_historic_seasons`
 
@@ -225,7 +235,7 @@ Inputs:
 - `limit` (optional): default `10`, max `25`
 
 Output:
-- JSON array with `position`, `player`, `team`, and `total`
+- `{ data, meta }` envelope; each row contains `position`, `player`, `team`, and `total`
 
 ## Resources
 
