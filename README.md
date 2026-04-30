@@ -1,5 +1,9 @@
 # Sportmonks Football MCP Server
 
+> ** BETA** — This server is currently in beta. Functionality may change and edge cases may be unhandled. It is a **companion tool for AI-assisted exploration of the Sportmonks Football API, not a production API client.** Use it to chat with your data, prototype, and learn the API shape; for production workloads keep using the Sportmonks Football API 3.0 directly.
+>
+> We actively welcome feedback — see the [Feedback](#feedback) section below.
+
 Model Context Protocol (MCP) server for the official Sportmonks Football API 3.0.
 
 This server exposes focused Sportmonks Football API tools for search, player/team/league lookup, squads, fixtures, standings, seasons, and topscorers.
@@ -270,16 +274,50 @@ All tool errors are returned as JSON with this shape:
 
 ## Example Prompts
 
-- "Search for Arsenal across all entity types."
-- "Get the team entity for id 14."
-- "Get upcoming matches for league 8."
-- "Get live matches for team 53."
-- "Get a match preview for fixture 18535517."
-- "Get detailed fixture data for fixture 2001 with lineups and events."
-- "Get standings for league 501."
-- "Get the current squad for team 14."
-- "Get historic seasons for league 501."
-- "Get the top goalscorers for season 2024."
+You don't need to know any Sportmonks ids — the server will look them up. Try any of these:
+
+**Finding things**
+- *Search for "Barcelona" — is it a team, a league, or both?*
+- *Find the player ID for Erling Haaland*
+- *Search for leagues named "Premier League"*
+
+**Teams & players**
+- *Get the profile for Manchester City*
+- *Show me the current squad for Liverpool*
+- *Who was in Arsenal's squad during the 2021/22 season?*
+- *Get the profile for Vinicius Jr — which team is he at?*
+
+**Fixtures**
+- *Show me Real Madrid's upcoming fixtures for the next two weeks*
+- *What were Chelsea's results over the last 30 days?*
+- *Are there any live matches right now?*
+- *Get the full details for fixture 123456 including lineups and events*
+
+**Standings & seasons**
+- *Show me the current Premier League standings*
+- *What seasons has the Champions League had? Give me the most recent ones first*
+- *Who are the top 10 goal scorers in Serie A this season?*
+- *Show me the top 5 assist providers and top 5 yellow card recipients in the Bundesliga*
+
+**Briefings (using prompts)**
+- *Give me a pre-match briefing for the upcoming El Clásico — use the `match_preview` prompt*
+- *Run the `team_overview` prompt for Manchester United*
+- *Generate a `league_overview` for the Premier League*
+
+**Building with the API**
+- *Fetch a sample fixture with lineups and events using `get_fixture_details`, then write me a TypeScript interface for the response shape*
+- *Use `get_standings` to get the current La Liga table and render it as a formatted markdown table*
+- *Build a function that takes a team name, searches for it, then fetches its next 5 fixtures*
+
+## Feedback
+
+This server is in beta and the team actively welcomes feedback. If you encounter issues, unexpected behavior, or have ideas for improvements, please email **support@sportmonks.com** and include:
+
+- The specific tool that was called and its arguments
+- What you expected versus what actually happened
+- Your AI client (Claude Desktop, Claude Code, Cursor, etc.) and the version of this package
+
+That detail helps us reproduce and fix issues quickly.
 
 ## Development
 
