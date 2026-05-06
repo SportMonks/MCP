@@ -39,7 +39,7 @@ The published npm binary works with any MCP client. Each example below fetches t
 ```bash
 claude mcp add sportmonks-football \
   --env SPORTMONKS_API_TOKEN="your-token" \
-  -- npx -y sportmonks-football-mcp-server
+  -- npx -y @sportmonks/football-mcp-server
 ```
 
 ### Claude Desktop
@@ -49,7 +49,7 @@ claude mcp add sportmonks-football \
   "mcpServers": {
     "sportmonks-football": {
       "command": "npx",
-      "args": ["-y", "sportmonks-football-mcp-server"],
+      "args": ["-y", "@sportmonks/football-mcp-server"],
       "env": {
         "SPORTMONKS_API_TOKEN": "your-token"
       }
@@ -65,7 +65,7 @@ claude mcp add sportmonks-football \
   "mcpServers": {
     "sportmonks-football": {
       "command": "npx",
-      "args": ["-y", "sportmonks-football-mcp-server"],
+      "args": ["-y", "@sportmonks/football-mcp-server"],
       "env": {
         "SPORTMONKS_API_TOKEN": "your-token"
       }
@@ -81,7 +81,7 @@ claude mcp add sportmonks-football \
   "servers": {
     "sportmonks-football": {
       "command": "npx",
-      "args": ["-y", "sportmonks-football-mcp-server"],
+      "args": ["-y", "@sportmonks/football-mcp-server"],
       "env": {
         "SPORTMONKS_API_TOKEN": "your-token"
       }
