@@ -87,19 +87,28 @@ When `error_kind` is `upstream_error` or `not_found`, use this to know which Spo
 
 | Tool | Endpoint(s) |
 | --- | --- |
-| `search` | `/football/players/search/{q}`, `/football/teams/search/{q}`, `/football/leagues/search/{q}` |
-| `get_player` | `/football/players/{id}?include=position;nationality;teams` + `/football/teams/{team_id}` |
-| `get_team` | `/football/teams/{id}?include=venue;country` |
+| `search` | `/football/players/search/{q}`, `/football/teams/search/{q}`, `/football/leagues/search/{q}`, `/football/coaches/search/{q}` (whichever the `type` selects; all four for `type=all`) |
+| `get_player` | `/football/players/{id}?include=position;nationality;teams.team` + `/football/teams/{team_id}` |
+| `get_team` | `/football/teams/{id}?include=venue;country;coaches.coach` (the active coach relation supplies the `coach` field) |
 | `get_league` | `/football/leagues/{id}?include=country;currentseason` |
+| `get_coach` | `/football/coaches/{id}?include=nationality;teams.team` (the active team relation supplies `current_team`) |
 | `get_squad` | `/football/squads/teams/{team_id}` or `/football/squads/seasons/{season_id}/teams/{team_id}` |
 | `get_matches` (upcoming/historic, team) | `/football/fixtures/between/{start}/{end}/{team_id}` |
 | `get_matches` (upcoming/historic, league) | `/football/fixtures/between/{start}/{end}` + `fixtureLeagues:{id}` filter |
 | `get_matches` (live) | `/football/livescores/inplay` |
 | `get_match_preview` | `/football/fixtures/{id}` + `/football/fixtures/head-to-head/{a}/{b}` |
-| `get_fixture_details` | `/football/fixtures/{id}` |
+| `get_fixture_details` | `/football/fixtures/{id}` (with `include=predictions`, the whole request requires the predictions add-on; a missing add-on surfaces as `authentication_error`. The `xg` include maps to the `xGFixture` relation) |
 | `get_standings` | `/football/standings/live/leagues/{id}` first; on empty/404, falls back to `/football/leagues/{id}?include=currentseason` then `/football/standings/seasons/{current_season_id}` |
 | `get_historic_seasons` | `/football/leagues/{id}?include=seasons` |
 | `get_topscorers` | `/football/topscorers/seasons/{id}` |
+| `get_odds` (prematch) | `/football/odds/pre-match/fixtures/{fixture_id}` + optional `markets:{id};bookmakers:{id}` filters; on empty data, `/football/fixtures/{fixture_id}` to distinguish "no odds" from "unknown fixture" |
+| `get_odds` (premium) | `/football/odds/premium/fixtures/{fixture_id}` (requires the premium odds subscription; 403 surfaces as `authentication_error`) + the same empty-data fixture check |
+| `get_season_stats` (player) | `/football/statistics/seasons/players/{entity_id}` + `playerstatisticSeasons:{season_id}` filter; on empty data, `/football/players/{entity_id}` to distinguish "no stats" from "unknown player" |
+| `get_season_stats` (team) | `/football/statistics/seasons/teams/{entity_id}` + `teamstatisticSeasons:{season_id}` filter; on empty data, `/football/teams/{entity_id}` |
+| `get_fixture_lineup_stats` | `/football/fixtures/{fixture_id}?include=lineups.details;participants` + `lineupdetailTypes:{type_ids}` filter (resolved from the requested stat names; the details include is skipped when no name resolves) |
+| `get_pressure_index` | `/football/fixtures/{fixture_id}?include=pressure;participants` (one request; team names resolved from participants. summary/timeline shaping is done in-process, not upstream) |
+| `get_transfers` (confirmed) | `/football/transfers/latest`, `/football/transfers/teams/{id}`, `/football/transfers/players/{id}`, or `/football/transfers/between/{start}/{end}` — by timeframe/scope; `include=player;fromteam;toteam` |
+| `get_transfers` (rumour) | same shapes under `/football/transfer-rumours/...` (no `/latest` — unscoped uses the base feed); requires the rumours add-on, a missing add-on surfaces as `authentication_error` |
 
 Plus startup-only:
 - `/core/types` — paginated, loaded once at startup for the shared type mapping

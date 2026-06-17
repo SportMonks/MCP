@@ -6,7 +6,7 @@
 
 Model Context Protocol (MCP) server for the official Sportmonks Football API 3.0.
 
-This server exposes focused Sportmonks Football API tools for search, player/team/league lookup, squads, fixtures, standings, seasons, and topscorers.
+This server exposes focused Sportmonks Football API tools for search, player/team/league/coach lookup, squads, fixtures, standings, seasons, topscorers, odds, season statistics, per-fixture player statistics, match pressure index, and transfers.
 
 ## Features
 
@@ -106,9 +106,11 @@ Point your MCP client at the compiled entrypoint (`node /absolute/path/to/dist/i
 
 ### Response shapes
 
-List-style tools (`search`, `get_matches`, `get_squad`, `get_standings`, `get_topscorers`) return a `{ data, meta }` envelope where `meta` contains `returned`, `cap`, and `possibly_more`. Use `meta.possibly_more` to detect upstream or local truncation. `get_matches` also exposes `meta.date_window` for non-live timeframes.
+List-style tools (`search`, `get_matches`, `get_squad`, `get_standings`, `get_topscorers`, `get_odds`, `get_season_stats`, `get_fixture_lineup_stats`, `get_transfers`) return a `{ data, meta }` envelope where `meta` contains `returned`, `cap`, and `possibly_more`. Use `meta.possibly_more` to detect upstream or local truncation. `get_matches` also exposes `meta.date_window` for non-live timeframes, and the two stats tools (`get_season_stats`, `get_fixture_lineup_stats`) expose `meta.stat_types` with the applied stat filter.
 
-Single-entity tools (`get_player`, `get_team`, `get_league`, `get_match_preview`, `get_fixture_details`) and `get_historic_seasons` return a JSON object or array directly without an envelope.
+`get_pressure_index` also returns a `{ data, meta }` envelope, but `meta` carries `returned`, `cap`, `possibly_more`, and the applied `mode`; its `data` is mode-dependent (summary aggregates or a per-minute timeline) rather than a flat list.
+
+Single-entity tools (`get_player`, `get_team`, `get_league`, `get_coach`, `get_match_preview`, `get_fixture_details`) and `get_historic_seasons` return a JSON object or array directly without an envelope.
 
 ### `search`
 
@@ -116,11 +118,11 @@ Search for entities in the Sportmonks database.
 
 Inputs:
 - `query` (required)
-- `type` (optional): `player`, `team`, `league`, `all` (default)
+- `type` (optional): `player`, `team`, `league`, `coach`, `all` (default)
 
 Output:
 - `{ data, meta }` envelope; `data` contains up to 25 items sorted alphabetically by name
-- Each item contains `id`, `entity_type`, `name`, and `country` (`country` may be `null` when Sportmonks doesn't provide one; useful for disambiguating generic names like the dozen leagues called "Super League")
+- Each item contains `id`, `entity_type` (`player`, `team`, `league`, or `coach`), `name`, and `country` (`country` may be `null` when Sportmonks doesn't provide one; useful for disambiguating generic names like the dozen leagues called "Super League")
 
 ### `get_player`
 
@@ -140,7 +142,7 @@ Inputs:
 - `id` (required)
 
 Output:
-- JSON object with `id`, `name`, `country`, and `venue`
+- JSON object with `id`, `name`, `country`, `venue`, and `coach` (`{ id, name }` for the current manager; `null` when no active coach is recorded)
 
 ### `get_league`
 
@@ -151,6 +153,16 @@ Inputs:
 
 Output:
 - JSON object with `id`, `name`, `country`, `current_season_id`, and `current_season_name`
+
+### `get_coach`
+
+Get coach details by id.
+
+Inputs:
+- `id` (required)
+
+Output:
+- JSON object with `id`, `name`, `nationality`, `date_of_birth`, and `current_team` (`{ id, name }` for the coach's active appointment; `null` when none is recorded). Mirrors `get_player`'s shape
 
 ### `get_squad`
 
@@ -201,13 +213,18 @@ Get detailed fixture data with optional expansions.
 
 Inputs:
 - `fixture_id` (required)
-- `includes` (optional): subset of `lineups`, `events`, `statistics`
+- `includes` (optional): subset of `lineups`, `events`, `statistics`, `predictions`, `xg`
 
 Output:
 - Base fixture object always includes `id`, `home_team`, `away_team`, `starting_at`, `state`, `league`, and `scores`
 - `lineups` (when requested): each row contains `player_id`, `player_name`, `team_id`, `jersey_number`, `position`, `detailed_position`, and `type` (`lineup` or `bench`). `team_id` lets you split home vs away without inferring from order
 - `events` (when requested): each event contains `minute`, `type`, `player_name`, `related_player_name`, `result`, and `info`
 - `statistics` (when requested): grouped per team with `team_id`, `team_name`, and a `stats` object keyed by stat name
+- `predictions` (when requested): a curated object with `home_win`, `draw`, `away_win`, `btts`, `over_2_5`, and `value_bets`. Probabilities are percentages on a 0–100 scale as Sportmonks returns them; `btts` and `over_2_5` carry only the positive direction (the inverse is derivable). Each value bet contains `bet` (1X2 notation: `"1"` home, `"X"` draw, `"2"` away), `bookmaker`, `fair_odd`, `odd`, `stake`, and `is_value`. Sportmonks exposes ~35 prediction types; this include curates the four most useful (fulltime result, BTTS, over/under 2.5, value bets) — fields are `null` (or `[]`) when a type is missing
+- `xg` (when requested): a list of one object per team with `team_id`, `team_name`, `xg` (Expected Goals), and `xg_on_target` (Expected Goals on Target / xGoT). Populated for finished and live fixtures with coverage; an empty array for upcoming fixtures or fixtures without xG data. Sportmonks exposes 10+ xG-family metrics; this include curates only xG and xGoT
+
+Constraint:
+- `predictions` requires a Sportmonks subscription with the predictions add-on; without it the whole call returns an `authentication_error` explaining how to retry without predictions
 
 ### `get_standings`
 
@@ -240,6 +257,125 @@ Inputs:
 
 Output:
 - `{ data, meta }` envelope; each row contains `position`, `player`, `team`, and `total`
+
+### `get_odds`
+
+Get pre-match or premium betting odds for a fixture. Inplay odds are not supported.
+
+Inputs:
+- `fixture_id` (required)
+- `type` (optional): `prematch` (default), `premium`
+- `market_id` (optional): filter to a single market (e.g. `1` for Fulltime Result)
+- `bookmaker_id` (optional): filter to a single bookmaker
+- `limit` (optional): default `50`, max `200`
+
+Output:
+- `{ data, meta }` envelope; each entry contains `bookmaker_id`, `bookmaker_name`, `market_id`, `market_name`, `label`, `value`, `total`, `handicap`, `stopped`, and `last_updated`
+- `value`, `total`, and `handicap` are decimal strings as Sportmonks sends them; `total`/`handicap` carry the line for markets like Goal Line or Asian Handicap
+- An empty `data` array means the fixture exists but has no odds for the requested feed type and filters
+
+Built-in limits:
+- at most `limit` entries (default 50, max 200), sorted by market then bookmaker; an unfiltered fixture can carry thousands of odds upstream, so narrow with `market_id` and/or `bookmaker_id` — or raise `limit` — when `meta.possibly_more` is `true`
+
+Constraint:
+- `type='premium'` requires a Sportmonks subscription that includes the premium odds feed; without it the tool returns an `authentication_error` explaining the tier requirement
+
+### `get_season_stats`
+
+Get seasonal statistics for a player or team.
+
+Inputs:
+- `entity_id` (required): player id or team id
+- `entity_type` (required): `player`, `team`
+- `season_id` (required): use `get_historic_seasons` to find one
+- `stat_types` (optional): stat names to return instead of the per-entity-type defaults, e.g. `["goals", "big_chances_created"]`
+
+Output:
+- `{ data, meta }` envelope; each row contains `entity_id`, `entity_name`, `entity_type`, `season_id`, `season_name`, and a `stats` object keyed by snake_case stat name
+- Player rows also contain `team` (`{ id, name }`) — a player's season stats are per club, so a mid-season transfer yields one row per club
+- Stat values mirror the upstream data: simple counters are unwrapped to plain numbers; richer stats (e.g. `goals` with penalty split, team stats with home/away splits, `rating` with average/highest/lowest) stay objects — so the same stat key can be a number for one entity and an object for another, depending on what Sportmonks tracks
+- `meta.stat_types` always reports the applied stat filter, whether default or user-supplied
+- An empty `data` array means the entity exists but has no statistics for that season
+
+Default stat filters:
+- player: `goals`, `assists`, `minutes_played`, `appearances`, `shots_on_target`, `passes`, `key_passes`, `tackles`, `rating`
+- team: `goals`, `goals_conceded`, `team_wins`, `team_draws`, `team_lost`, `cleansheets`, `shots`, `pass_stats`, `ball_possession`
+
+Notes:
+- stat names are the snake_case of the Sportmonks type name (`"Shots On Target"` → `shots_on_target`); spellings like `"Shots On Target"` or `"shots-on-target"` are normalized automatically
+- stat availability varies by league, entity type, and data tier — and Sportmonks omits zero-value stats entirely — so a stat missing from `stats` means "not tracked or zero"; the two cases cannot be distinguished upstream. A player with no minutes in the season yields a row with an empty `stats` object
+- teams have no `shots_on_target` or `passes` stat types upstream; shots-on-target lives inside `shots` and pass numbers inside `pass_stats`
+
+### `get_fixture_lineup_stats`
+
+Get player-level statistics for a fixture — both squads, including bench.
+
+Inputs:
+- `fixture_id` (required)
+- `player_ids` (optional): filter to specific players
+- `stat_types` (optional): stat names to return instead of the defaults, e.g. `["rating", "passes", "shots_total"]`
+
+Output:
+- `{ data, meta }` envelope; each row contains `player_id`, `player_name`, `team_id`, `team_name`, `type` (`lineup` or `bench`), and a `stats` object keyed by snake_case stat name
+- `meta.stat_types` always reports the applied stat filter, whether default or user-supplied
+- An empty `data` array means the fixture exists but has no lineup data (not announced yet, or not covered for the league) — or, when `player_ids` is set, that none of the requested players are in the lineups
+
+Default stat filter:
+- `goals`, `assists`, `minutes_played`
+
+Built-in limits:
+- max 60 player rows (an international friendly with extended benches produced 49, so real fixtures are never truncated)
+
+Notes:
+- the stat filter is pushed upstream (an unfiltered fixture carries ~900 stat entries across ~60 types), so narrow `stat_types` rather than post-filtering large responses
+- stat names are the snake_case of the Sportmonks type name, normalized like `get_season_stats`
+- Sportmonks omits zero-value stats, so a missing stat means "not tracked or zero"; under the default filter (which includes `minutes_played`) a `bench` player with an empty `stats` object did not come on — with a narrower override, empty may just mean none of the requested stats were recorded
+
+### `get_pressure_index`
+
+Get the Sportmonks Pressure Index for a fixture — a proprietary real-time metric scoring which team is dominating, minute by minute. Use it to describe momentum swings and periods of dominance.
+
+Inputs:
+- `fixture_id` (required)
+- `mode` (optional): `summary` (default) or `timeline`
+
+Output (both modes return a `{ data, meta }` envelope; `meta` is `{ returned, cap, possibly_more, mode }`):
+- `summary`: `data` is `{ teams, swings }`. `teams` is `[home, away]`, each with `team_id`, `team_name`, `peak_pressure`, `average_pressure`, and `dominance_share` (% of recorded minutes that team led). `swings` is the top momentum-swing minutes (lead changes, most decisive first by pressure, then chronological), each with `minute`, `team_id`, `team_name`, and `pressure`
+- `timeline`: `data` is `{ teams, timeline }`. `teams` is `[home, away]` (`team_id`, `team_name`); `teams[0]` is the `home` key and `teams[1]` the `away` key. `timeline` is the cleaned per-minute series sorted by minute, each entry `{ minute, home, away }` with the redundant `id`/`fixture_id` stripped
+
+Built-in limits:
+- timeline capped at 150 minute-entries (a full 90' match is ~94; covers extra time), with `meta.possibly_more` flagging truncation. Summary aggregates the whole recorded series
+
+Notes:
+- works for live (partial series) and finished (full series) fixtures; returns an empty series for upcoming fixtures or fixtures without pressure data
+- pressure is a relativity metric — only one team has positive pressure at a time, so `dominance_share` values reflect who led each minute and a tied (both-zero) minute counts toward neither
+- team names are resolved from the fixture participants returned by the same call (no extra lookup)
+
+### `get_transfers`
+
+Get football transfers: latest market activity, transfers for a team or player, or transfers within a date range. Confirmed transfers and rumours share one shape, selected via `type`.
+
+Inputs:
+- `id` (optional): team or player id to scope to
+- `entity_type` (`team` | `player`): required when `id` is provided
+- `type` (`confirmed` | `rumour`): default `confirmed`; rumours require a subscription add-on
+- `timeframe` (`latest` | `date_range`): defaults to `latest` when an `id` is provided; for an unscoped query (no `id`) it must be set explicitly
+- `start_date` / `end_date` (YYYY-MM-DD): required when `timeframe=date_range`; the window must not exceed 31 days (the Sportmonks API limit for transfer date ranges)
+
+Output:
+- `{ data, meta }` envelope, max 25 results; each entry contains `id`, `player` (`{ id, name }`), `from_team` (`{ id, name }`), `to_team` (`{ id, name }`), `type` (`confirmed`/`rumour`), `transfer_kind` (resolved transfer type, e.g. `Transfer`, `Loan`, `End of loan`), `fee`, and `date`
+- `fee` is `null` for undisclosed deals (never `0`)
+
+Constraints / validation:
+- requires either an `id` (with `entity_type`) or an explicit `timeframe` — a bare call with neither is rejected
+- `id` without `entity_type` is rejected
+- a `date_range` window longer than 31 days is rejected (Sportmonks caps transfer date ranges at 31 days)
+- `date_range` cannot be combined with an `id` — there is no date-scoped team/player endpoint, so the combination is rejected rather than silently ignoring the window
+- `type='rumour'` without the rumours add-on returns a clear `authentication_error` telling you to retry with `type='confirmed'` or upgrade
+
+Notes:
+- rumours have no dedicated "latest" feed, so an unscoped `timeframe=latest` rumour query reads the full rumour feed (still capped at 25)
+- rumour-only fields (probability, source, currency) are dropped to keep one uniform shape across both types
 
 ## Resources
 
@@ -286,18 +422,39 @@ You don't need to know any Sportmonks ids — the server will look them up. Try 
 - *Show me the current squad for Liverpool*
 - *Who was in Arsenal's squad during the 2021/22 season?*
 - *Get the profile for Vinicius Jr — which team is he at?*
+- *Who is the current coach of Manchester City?*
+- *Find the coach Pep Guardiola and tell me which club he manages*
 
 **Fixtures**
 - *Show me Real Madrid's upcoming fixtures for the next two weeks*
 - *What were Chelsea's results over the last 30 days?*
 - *Are there any live matches right now?*
 - *Get the full details for fixture 123456 including lineups and events*
+- *What were the xG and xGoT for both teams in fixture 123456?*
+- *Who controlled fixture 123456 and when did the momentum swing? Use the pressure index*
 
 **Standings & seasons**
 - *Show me the current Premier League standings*
 - *What seasons has the Champions League had? Give me the most recent ones first*
 - *Who are the top 10 goal scorers in Serie A this season?*
 - *Show me the top 5 assist providers and top 5 yellow card recipients in the Bundesliga*
+
+**Odds**
+- *What are the match-winner odds for England's next fixture?*
+- *Which bookmaker offers the best odds on a home win in tomorrow's Madrid derby?*
+
+**Season statistics**
+- *How many goals and assists did Haaland record in the 2025/26 Premier League season?*
+- *Compare Manchester City's goals scored and conceded at home vs away last season*
+
+**Player match stats**
+- *How many minutes did each Iceland player get in the Argentina friendly?*
+- *Get the player ratings and passes for both teams in yesterday's final*
+
+**Transfers**
+- *Show me the latest confirmed transfers*
+- *What transfer rumours are linked to Real Madrid right now?*
+- *List all transfers in January 2026*
 
 **Briefings (using prompts)**
 - *Give me a pre-match briefing for the upcoming El Clásico — use the `match_preview` prompt*

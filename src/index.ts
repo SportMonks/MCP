@@ -28,6 +28,7 @@ This server exposes focused Sportmonks football tools, including:
 - get_player(id)
 - get_team(id)
 - get_league(id)
+- get_coach(id)
 - get_squad(team_id, season_id?)
 - get_matches(id, type, timeframe?)
 - get_match_preview(id)
@@ -35,6 +36,11 @@ This server exposes focused Sportmonks football tools, including:
 - get_standings(id)
 - get_historic_seasons(league_id)
 - get_topscorers(season_id, type, limit?)
+- get_odds(fixture_id, type?, market_id?, bookmaker_id?, limit?)
+- get_season_stats(entity_id, entity_type, season_id, stat_types?)
+- get_fixture_lineup_stats(fixture_id, player_ids?, stat_types?)
+- get_pressure_index(fixture_id, mode?)
+- get_transfers(id?, entity_type?, type?, timeframe?, start_date?, end_date?)
 
 Authentication
 - Set SPORTMONKS_API_TOKEN before starting the server.
@@ -42,20 +48,45 @@ Authentication
 
 Behavior Notes
 - All tool outputs are valid JSON.
-- List-style tools (search, get_matches, get_topscorers, get_standings, get_squad) return an envelope
-  '{ "data": [...], "meta": { "returned", "cap", "possibly_more", "date_window?" } }'.
+- List-style tools (search, get_matches, get_topscorers, get_standings, get_squad, get_odds,
+  get_season_stats, get_fixture_lineup_stats, get_transfers) return an envelope
+  '{ "data": [...], "meta": { "returned", "cap", "possibly_more", "date_window?", "stat_types?" } }'.
   Use 'meta.possibly_more' to detect server-side or local truncation.
-- Single-entity tools (get_player, get_team, get_league, get_match_preview, get_fixture_details,
-  get_historic_seasons) return a JSON object or array directly, without an envelope.
+- get_pressure_index returns a '{ "data", "meta" }' envelope where meta is
+  '{ "returned", "cap", "possibly_more", "mode" }'; data is mode-dependent (summary aggregates or a
+  per-minute timeline), not a flat list.
+- Single-entity tools (get_player, get_team, get_league, get_coach, get_match_preview,
+  get_fixture_details, get_historic_seasons) return a JSON object or array directly, without an envelope.
 - Validation errors explain what is wrong and how to fix the request.
 - Search returns at most 25 results; meta.possibly_more flags when more matched upstream.
 - All types and states are fetched on startup and used to build shared mappings.
 - get_player uses the exact two-step player/team lookup flow to resolve the current team name.
+- search supports types player, team, league, coach, and all.
+- get_coach mirrors get_player: id, name, nationality, date_of_birth, current_team (the active appointment).
+- get_team includes the current coach ({ id, name }); null when no active coach is recorded.
 - get_matches limits output to:
   - upcoming: 14 days ahead, max 20 fixtures
   - historic: 30 days back, max 20 fixtures
   - live: max 20 fixtures
 - get_match_preview only works for fixtures that have not started yet.
+- get_fixture_details supports includes: lineups, events, statistics, predictions, xg. The predictions
+  include returns curated probabilities (percentages, 0-100) plus value bets and requires a
+  subscription with the predictions add-on. The xg include returns Expected Goals (xG) and Expected
+  Goals on Target (xGoT) per team; empty array for upcoming fixtures or fixtures without xG coverage.
+- get_odds returns at most 'limit' entries (default 50, max 200) sorted by market then bookmaker.
+  An unfiltered fixture can carry thousands of odds upstream, so narrow with market_id and/or
+  bookmaker_id. type='premium' requires a subscription that includes the premium odds feed.
+- get_season_stats applies a curated default stat filter per entity type; override with
+  stat_types (snake_case names). meta.stat_types always reports the applied filter.
+- get_fixture_lineup_stats defaults to goals, assists, minutes_played per player; override with
+  stat_types. Sportmonks omits zero-value stats, so missing means not-tracked or zero.
+- get_pressure_index returns the per-minute Pressure Index for a fixture. mode='summary' (default)
+  gives per-team peak/average/dominance share plus swing minutes; mode='timeline' gives the cleaned
+  per-minute series. Empty series for upcoming fixtures or fixtures without pressure data.
+- get_transfers covers latest market activity, team/player transfers, and date-range queries
+  (max 31-day window — the Sportmonks limit), for confirmed transfers or rumours (type='rumour'
+  needs an add-on). Capped at 25. An unscoped query (no id) must set timeframe explicitly; a
+  scoped query defaults to latest.
 
 Related Resources
 - sportmonks://documentation: this overview.
@@ -72,6 +103,72 @@ Official References
 const SPORTMONKS_SERVER_VERSION = "1.2.0";
 const MAX_SEARCH_RESULTS = 25;
 const MAX_MATCH_RESULTS = 20;
+const DEFAULT_ODDS_RESULTS = 50;
+const MAX_ODDS_RESULTS = 200;
+
+// Sportmonks ships ~35 prediction types; the MCP curates these four. Verified
+// against /core/types: the ids are stable and carry these developer names.
+const PREDICTION_TYPE_FULLTIME_RESULT = 237; // FULLTIME_RESULT_PROBABILITY
+const PREDICTION_TYPE_BTTS = 231; // BTTS_PROBABILITY
+const PREDICTION_TYPE_OVER_UNDER_2_5 = 235; // OVER_UNDER_2_5_PROBABILITY
+const PREDICTION_TYPE_VALUEBET = 33; // VALUEBET
+
+// The xGFixture include carries all ~52 fixture stat types per team; the MCP
+// exposes only these two. Verified unique in /core/types (no name collisions).
+const XG_TYPE_ID = 5304; // EXPECTED_GOALS — "Expected Goals (xG)"
+const XGOT_TYPE_ID = 5305; // EXPECTED_GOALS_ON_TARGET — "Expected Goals on Target (xGoT)"
+
+// One row per (entity, season, team) — typically a single row, but mid-season
+// transfers produce one row per club, so the envelope stays a list.
+const MAX_SEASON_STATS_ROWS = 10;
+// Default stat filters keyed by the snake_case of the Sportmonks type name
+// (the same key format the stats object uses). Player and team season stats
+// expose different type sets upstream: teams have no 'shots_on_target' or
+// 'passes' types — shots-on-target lives inside 'shots' (type 1677) and pass
+// numbers inside 'pass_stats' (type 27253).
+const DEFAULT_PLAYER_STAT_TYPES = [
+  "goals",
+  "assists",
+  "minutes_played",
+  "appearances",
+  "shots_on_target",
+  "passes",
+  "key_passes",
+  "tackles",
+  "rating",
+];
+const DEFAULT_TEAM_STAT_TYPES = [
+  "goals",
+  "goals_conceded",
+  "team_wins",
+  "team_draws",
+  "team_lost",
+  "cleansheets",
+  "shots",
+  "pass_stats",
+  "ball_possession",
+];
+
+// A fixture lineup covers both squads incl. unused bench — 49 rows observed on
+// an international friendly with extended benches, so 60 never truncates a
+// real fixture while still bounding the envelope.
+const MAX_LINEUP_STATS_ROWS = 60;
+const DEFAULT_LINEUP_STAT_TYPES = ["goals", "assists", "minutes_played"];
+
+// Pressure is one row per team per minute. A full 90' match collapses to ~94
+// per-minute entries; 150 covers extra-time + stoppage without truncating real
+// matches, while still flagging via possibly_more if ever exceeded.
+const MAX_PRESSURE_TIMELINE_ROWS = 150;
+// Summary surfaces only the most decisive momentum swings, not every lead change.
+const MAX_PRESSURE_SWINGS = 5;
+
+// Transfers can be high-volume (latest/date-range feeds page well past this),
+// so cap hard. Sportmonks itself rejects a /between range over 31 days (verified
+// live on both /transfers and /transfer-rumours), so we validate to that limit
+// up front rather than letting an over-wide range fail upstream with a confusing
+// error. (The originating ticket assumed a 6-month window; the real API is 31 days.)
+const MAX_TRANSFER_RESULTS = 25;
+const MAX_TRANSFER_RANGE_DAYS = 31;
 const UPCOMING_WINDOW_DAYS = 14;
 const HISTORIC_WINDOW_DAYS = 30;
 const API_TIMEOUT_MS = 20_000;
@@ -79,12 +176,18 @@ const API_TIMEOUT_MS = 20_000;
 // ── Types ────────────────────────────────────────────────────────────────────
 
 type ParamValue = string | number | boolean | undefined;
-type SearchEntityType = "player" | "team" | "league" | "all";
-type EntityType = "player" | "team" | "league";
+type SearchEntityType = "player" | "team" | "league" | "coach" | "all";
+type EntityType = "player" | "team" | "league" | "coach";
 type MatchEntityType = "team" | "league";
 type MatchTimeframe = "live" | "historic" | "upcoming";
-type FixtureDetailInclude = "lineups" | "events" | "statistics";
+type FixtureDetailInclude = "lineups" | "events" | "statistics" | "predictions" | "xg";
 type TopscorerType = "goals" | "assists" | "cards";
+type OddsFeedType = "prematch" | "premium";
+type SeasonStatsEntityType = "player" | "team";
+type PressureMode = "summary" | "timeline";
+type TransferType = "confirmed" | "rumour";
+type TransferTimeframe = "latest" | "date_range";
+type TransferEntityType = "team" | "player";
 type ToolErrorKind =
   | "authentication_error"
   | "not_found"
@@ -269,6 +372,90 @@ function requireEnumArray<T extends string>(
   );
 
   return [...new Set(normalizedValues)];
+}
+
+function requireOptionalStatTypes(value: unknown, fieldName: string) {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new SportmonksToolError(
+      "validation_error",
+      `The '${fieldName}' field must be a non-empty array of stat type names.`,
+      `Call the tool again with '${fieldName}' as an array such as ['goals', 'assists'], or omit it to use the defaults.`,
+    );
+  }
+
+  // Accept any human spelling ("Shots On Target", "shots-on-target") and
+  // normalize to the snake_case key format the stats object uses.
+  const normalized = value.map((entry, index) => {
+    if (typeof entry !== "string" || entry.trim() === "") {
+      throw new SportmonksToolError(
+        "validation_error",
+        `The '${fieldName}' entry at index ${index} must be a non-empty string.`,
+        `Call the tool again with '${fieldName}' containing only non-empty stat type names such as 'goals'.`,
+      );
+    }
+    return toSnakeCaseKey(entry);
+  });
+
+  return [...new Set(normalized)];
+}
+
+function requireOptionalPositiveIntegerArray(value: unknown, fieldName: string) {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new SportmonksToolError(
+      "validation_error",
+      `The '${fieldName}' field must be a non-empty array of positive integers.`,
+      `Call the tool again with '${fieldName}' as an array such as [154421, 96353], or omit it.`,
+    );
+  }
+
+  const normalized = value.map((entry, index) => {
+    const numericValue =
+      typeof entry === "number"
+        ? entry
+        : typeof entry === "string" && entry.trim() !== ""
+          ? Number(entry)
+          : Number.NaN;
+    if (!Number.isInteger(numericValue) || numericValue <= 0) {
+      throw new SportmonksToolError(
+        "validation_error",
+        `The '${fieldName}' entry at index ${index} must be a positive integer.`,
+        `Call the tool again with '${fieldName}' containing only positive integers.`,
+      );
+    }
+    return numericValue;
+  });
+
+  return [...new Set(normalized)];
+}
+
+function requireDateString(value: unknown, fieldName: string) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value.trim())) {
+    throw new SportmonksToolError(
+      "validation_error",
+      `The '${fieldName}' field must be a date in YYYY-MM-DD format.`,
+      `Call the tool again with '${fieldName}' set to a date such as '2026-01-31'.`,
+    );
+  }
+
+  const trimmed = value.trim();
+  const parsed = new Date(`${trimmed}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new SportmonksToolError(
+      "validation_error",
+      `The '${fieldName}' value '${value}' is not a valid calendar date.`,
+      `Call the tool again with '${fieldName}' set to a real date such as '2026-01-31'.`,
+    );
+  }
+
+  return trimmed;
 }
 
 // ── JSON Helpers ─────────────────────────────────────────────────────────────
@@ -680,6 +867,7 @@ interface ListMeta {
   cap: number;
   possibly_more: boolean;
   date_window?: { start: string; end: string };
+  stat_types?: string[];
 }
 
 function buildListMeta(
@@ -831,6 +1019,22 @@ function getFixtureGoalsForParticipant(fixture: unknown, participant: unknown) {
 function getTypeLookupLabel(typeId: number | null) {
   const typeLookup = getTypeLookupById(typeId);
   return typeLookup?.name ?? typeLookup?.code ?? typeLookup?.developerName ?? null;
+}
+
+function resolveStatTypeIds(statTypes: string[]) {
+  // Reverse of the detail-mapping direction: find every cached type whose
+  // label snake-cases to a requested stat name (labels are not guaranteed
+  // unique across the ~1300 core types, so collect all matches). Uses the
+  // same label precedence as getTypeLookupLabel so forward and reverse
+  // mappings agree.
+  const ids: number[] = [];
+  for (const typeLookup of typeLookupById.values()) {
+    const label = typeLookup.name ?? typeLookup.code ?? typeLookup.developerName;
+    if (label !== null && statTypes.includes(toSnakeCaseKey(label))) {
+      ids.push(typeLookup.id);
+    }
+  }
+  return ids;
 }
 
 function normalizeLookupToken(value: string | null) {
@@ -1052,6 +1256,33 @@ function mapStanding(record: unknown) {
   };
 }
 
+function mapOdd(record: unknown) {
+  // value/total/handicap stay as the strings Sportmonks sends ("19.00", "2.5",
+  // "-1.5") so no formatting or precision is lost. total and handicap are what
+  // make lines like Goal Line or Asian Handicap readable: label "Over" with
+  // value "2.03" only means something next to total "2.5".
+  return {
+    bookmaker_id: getNumber(record, ["bookmaker_id"]),
+    bookmaker_name: getPreferredName(readPath(record, ["bookmaker"])),
+    market_id: getNumber(record, ["market_id"]),
+    market_name:
+      getPreferredName(readPath(record, ["market"])) ??
+      getString(record, ["market_description"]),
+    label: getString(record, ["label"]),
+    value: getString(record, ["value"]),
+    total: getString(record, ["total"]),
+    handicap: getString(record, ["handicap"]),
+    stopped: getBoolean(record, ["stopped"]),
+    last_updated: getString(record, ["latest_bookmaker_update"]),
+  };
+}
+
+function isUsableOddsRow(row: ReturnType<typeof mapOdd>): boolean {
+  // Drop placeholder rows where Sportmonks returned a stub with neither a
+  // market nor a price. Mirrors isUsableMatchRow's defense-in-depth.
+  return row.market_id !== null || row.value !== null;
+}
+
 // ── Tool Implementations ─────────────────────────────────────────────────────
 
 async function fetchSearchResults(query: string, type: SearchEntityType) {
@@ -1063,10 +1294,11 @@ async function fetchSearchResults(query: string, type: SearchEntityType) {
     player: () => apiRequest(`/players/search/${encodeURIComponent(query)}`, baseParams),
     team: () => apiRequest(`/teams/search/${encodeURIComponent(query)}`, baseParams),
     league: () => apiRequest(`/leagues/search/${encodeURIComponent(query)}`, baseParams),
+    coach: () => apiRequest(`/coaches/search/${encodeURIComponent(query)}`, baseParams),
   };
 
   const entityTypes: Array<Exclude<SearchEntityType, "all">> =
-    type === "all" ? ["player", "team", "league"] : [type];
+    type === "all" ? ["player", "team", "league", "coach"] : [type];
 
   const payloads = await Promise.all(entityTypes.map((entityType) => entityLoaders[entityType]()));
 
@@ -1096,6 +1328,23 @@ async function fetchSearchResults(query: string, type: SearchEntityType) {
 async function searchEntities(query: string, type: SearchEntityType) {
   const { data, meta } = await fetchSearchResults(query, type);
   return jsonResponse(listResponse(data, meta));
+}
+
+function getCurrentRelation(relations: JsonRecord[]): JsonRecord | null {
+  // Coach<->team relations carry `active: true` for the live appointment.
+  // Among multiple active rows (rare), prefer permanent over caretaker, then
+  // the most recently started. No active row → no current relation (null).
+  const active = relations.filter((relation) => getBoolean(relation, ["active"]) === true);
+  if (active.length === 0) {
+    return null;
+  }
+
+  return [...active].sort((left, right) => {
+    const leftTemp = getBoolean(left, ["temporary"]) === true ? 1 : 0;
+    const rightTemp = getBoolean(right, ["temporary"]) === true ? 1 : 0;
+    if (leftTemp !== rightTemp) return leftTemp - rightTemp;
+    return parseDateToMs(getString(right, ["start"])) - parseDateToMs(getString(left, ["start"]));
+  })[0];
 }
 
 async function fetchEntity(id: number, type: EntityType) {
@@ -1150,14 +1399,47 @@ async function fetchEntity(id: number, type: EntityType) {
       };
     }
     case "team": {
-      const teamPayload = await apiRequest(`/teams/${id}`, { include: "venue;country" });
+      // coaches.coach brings the nested Coach object so we can name the current
+      // manager without a second roundtrip.
+      const teamPayload = await apiRequest(`/teams/${id}`, { include: "venue;country;coaches.coach" });
       const team = getSingleResponseItem(teamPayload, "Team");
+      const coachRelation = getCurrentRelation(toRecordArray(readPath(team, ["coaches"])));
+      const coach = coachRelation ? readPath(coachRelation, ["coach"]) : null;
 
       return {
         id: getNumber(team, ["id"]),
         name: getPreferredName(team),
         country: getPreferredName(readPath(team, ["country"])),
         venue: getPreferredName(readPath(team, ["venue"])),
+        coach: coachRelation
+          ? {
+              id: getNumber(coach, ["id"]) ?? getNumber(coachRelation, ["coach_id"]),
+              name: getPreferredName(coach),
+            }
+          : null,
+      };
+    }
+    case "coach": {
+      // teams.team brings the nested Team object so we can name the current club
+      // (the active relation) without a second roundtrip. Mirrors get_player.
+      const payload = await apiRequest(`/coaches/${id}`, {
+        include: "nationality;teams.team",
+      });
+      const coach = getSingleResponseItem(payload, "Coach");
+      const currentRelation = getCurrentRelation(toRecordArray(readPath(coach, ["teams"])));
+      const team = currentRelation ? readPath(currentRelation, ["team"]) : null;
+
+      return {
+        id: getNumber(coach, ["id"]),
+        name: getPreferredName(coach),
+        nationality: getPreferredName(readPath(coach, ["nationality"])),
+        date_of_birth: getString(coach, ["date_of_birth"]),
+        current_team: currentRelation
+          ? {
+              id: getNumber(team, ["id"]) ?? getNumber(currentRelation, ["team_id"]),
+              name: getPreferredName(team),
+            }
+          : null,
       };
     }
     case "league": {
@@ -1188,6 +1470,10 @@ async function getTeam(id: number) {
 
 async function getLeague(id: number) {
   return jsonResponse(await fetchEntity(id, "league"));
+}
+
+async function getCoach(id: number) {
+  return jsonResponse(await fetchEntity(id, "coach"));
 }
 
 async function fetchMatches(id: number, type: MatchEntityType, timeframe: MatchTimeframe) {
@@ -1405,12 +1691,39 @@ async function fetchFixtureDetails(
     if (entry === "lineups") {
       return ["lineups.player", "lineups.position", "lineups.detailedPosition"];
     }
+    // The user-facing 'xg' include maps to the Sportmonks 'xGFixture' relation.
+    if (entry === "xg") {
+      return ["xGFixture"];
+    }
     return [entry];
   });
   const includeValue = ["participants", "scores", "league", "state", ...expandedIncludes].join(";");
-  const payload = await apiRequest(`/fixtures/${fixtureId}`, {
-    include: includeValue,
-  });
+
+  let payload: unknown;
+  try {
+    payload = await apiRequest(`/fixtures/${fixtureId}`, {
+      include: includeValue,
+    });
+  } catch (error) {
+    // Predictions are a Sportmonks add-on. When the subscription lacks it, the
+    // include doesn't degrade silently — the WHOLE fixtures request fails with
+    // 403 ("You do not have access to the 'predictions' include"), so surface
+    // an error that tells the caller how to get the rest of the data back.
+    if (
+      includes.includes("predictions") &&
+      error instanceof SportmonksToolError &&
+      error.kind === "authentication_error"
+    ) {
+      throw new SportmonksToolError(
+        "authentication_error",
+        "Sportmonks rejected the request. The predictions include requires a subscription with the predictions add-on.",
+        "Call the tool again without 'predictions' in includes for the remaining fixture data, or upgrade the Sportmonks subscription to include predictions. If other tools also fail, verify SPORTMONKS_API_TOKEN instead.",
+        error.details,
+      );
+    }
+    throw error;
+  }
+
   const fixture = getSingleResponseItem(payload, "Fixture");
   const { home, away } = getHomeAndAwayParticipants(fixture);
   const scoreSummary = getFixtureScoreSummary(fixture);
@@ -1529,6 +1842,86 @@ async function fetchFixtureDetails(
     }
 
     response.statistics = [...groupedStatistics.values()];
+  }
+
+  if (includes.includes("xg")) {
+    // xGFixture rows are per type, per team (keyed by participant_id like
+    // statistics). Collapse the two curated types into one row per team. An
+    // empty xgfixture relation (upcoming fixtures, or live/finished fixtures
+    // without xG coverage) yields an empty array.
+    const participants = toRecordArray(readPath(fixture, ["participants"]));
+    const participantById = new Map(
+      participants
+        .map((participant) => [getNumber(participant, ["id"]), participant] as const)
+        .filter(([participantId]) => participantId !== null),
+    );
+    const xgByTeam = new Map<
+      number,
+      { team_id: number; team_name: string | null; xg: number | null; xg_on_target: number | null }
+    >();
+
+    for (const row of toRecordArray(readPath(fixture, ["xgfixture"]))) {
+      const typeId = getNumber(row, ["type_id"]);
+      if (typeId !== XG_TYPE_ID && typeId !== XGOT_TYPE_ID) {
+        continue;
+      }
+
+      const teamId = getNumber(row, ["participant_id"]) ?? getNumber(row, ["team_id"]);
+      if (teamId === null) {
+        continue;
+      }
+
+      const existing =
+        xgByTeam.get(teamId) ?? {
+          team_id: teamId,
+          team_name: getPreferredName(participantById.get(teamId)),
+          xg: null,
+          xg_on_target: null,
+        };
+
+      const value = getNumber(row, ["data", "value"]);
+      if (typeId === XG_TYPE_ID) {
+        existing.xg = value;
+      } else {
+        existing.xg_on_target = value;
+      }
+      xgByTeam.set(teamId, existing);
+    }
+
+    response.xg = [...xgByTeam.values()];
+  }
+
+  if (includes.includes("predictions")) {
+    const rows = toRecordArray(readPath(fixture, ["predictions"]));
+    const predictionByType = (typeId: number) =>
+      rows.find((row) => getNumber(row, ["type_id"]) === typeId) ?? null;
+
+    const fulltimeResult = predictionByType(PREDICTION_TYPE_FULLTIME_RESULT);
+    const btts = predictionByType(PREDICTION_TYPE_BTTS);
+    const overUnder = predictionByType(PREDICTION_TYPE_OVER_UNDER_2_5);
+    const valueBets = rows.filter(
+      (row) => getNumber(row, ["type_id"]) === PREDICTION_TYPE_VALUEBET,
+    );
+
+    // Probabilities are percentages on a 0-100 scale, exactly as Sportmonks
+    // returns them. btts and over_2_5 carry only the positive direction
+    // ('yes'); the inverse is derivable. value_bets keeps the upstream fields:
+    // 'bet' uses 1X2 notation ("1" home, "X" draw, "2" away).
+    response.predictions = {
+      home_win: getNumber(fulltimeResult, ["predictions", "home"]),
+      draw: getNumber(fulltimeResult, ["predictions", "draw"]),
+      away_win: getNumber(fulltimeResult, ["predictions", "away"]),
+      btts: getNumber(btts, ["predictions", "yes"]),
+      over_2_5: getNumber(overUnder, ["predictions", "yes"]),
+      value_bets: valueBets.map((row) => ({
+        bet: getString(row, ["predictions", "bet"]),
+        bookmaker: getString(row, ["predictions", "bookmaker"]),
+        fair_odd: getNumber(row, ["predictions", "fair_odd"]),
+        odd: getNumber(row, ["predictions", "odd"]),
+        stake: getNumber(row, ["predictions", "stake"]),
+        is_value: getBoolean(row, ["predictions", "is_value"]),
+      })),
+    };
   }
 
   return response;
@@ -1688,13 +2081,682 @@ async function getTopscorers(
   return jsonResponse(listResponse(data, meta));
 }
 
-async function getEntityReference(id: number, type: MatchEntityType) {
+async function assertFixtureExists(fixtureId: number) {
+  // Same caveat as getEntityReference: Sportmonks doesn't reliably 404 on
+  // unknown ids, so verify the response actually carries a fixture id. Build
+  // the error here rather than relying on getSingleResponseItem or the
+  // apiRequest 404 mapping — their generic messages recommend the 'search'
+  // tool, which cannot find fixture ids.
+  const notFound = new SportmonksToolError(
+    "not_found",
+    `Fixture ${fixtureId} was not found in Sportmonks.`,
+    "Verify the fixture id is correct and available in your Sportmonks subscription. Use get_matches to find a valid fixture id.",
+  );
+
+  let payload: unknown;
+  try {
+    payload = await apiRequest(`/fixtures/${fixtureId}`);
+  } catch (error) {
+    if (error instanceof SportmonksToolError && error.kind === "not_found") {
+      throw notFound;
+    }
+    throw error;
+  }
+
+  const fixture = getResponseItems(payload)[0] ?? null;
+  if (getNumber(fixture, ["id"]) === null) {
+    throw notFound;
+  }
+}
+
+async function fetchOdds(
+  fixtureId: number,
+  type: OddsFeedType,
+  limit: number,
+  marketId?: number,
+  bookmakerId?: number,
+) {
+  const endpoint =
+    type === "premium"
+      ? `/odds/premium/fixtures/${fixtureId}`
+      : `/odds/pre-match/fixtures/${fixtureId}`;
+
+  // Both filters compose on the one fixture endpoint, so a single request
+  // covers every filter combination including market + bookmaker together.
+  const filters = [
+    ...(marketId !== undefined ? [`markets:${marketId}`] : []),
+    ...(bookmakerId !== undefined ? [`bookmakers:${bookmakerId}`] : []),
+  ].join(";");
+
+  const params: Record<string, ParamValue> = { include: "market;bookmaker" };
+  if (filters !== "") {
+    params.filters = filters;
+  }
+
+  let payload: unknown;
+  try {
+    payload = await apiRequest(endpoint, params);
+  } catch (error) {
+    if (error instanceof SportmonksToolError && error.kind === "authentication_error") {
+      throw new SportmonksToolError(
+        "authentication_error",
+        type === "premium"
+          ? "Sportmonks rejected the premium odds request. The premium odds feed requires a subscription tier that includes it."
+          : "Sportmonks rejected the odds request. The subscription may not include the standard pre-match odds feed.",
+        type === "premium"
+          ? "Retry with type='prematch' for the standard feed, or upgrade the Sportmonks subscription to include premium odds."
+          : "Verify SPORTMONKS_API_TOKEN and confirm the subscription includes the pre-match odds feed.",
+        error.details,
+      );
+    }
+    throw error;
+  }
+
+  const rows = getResponseItems(payload).map(mapOdd).filter(isUsableOddsRow);
+
+  if (rows.length === 0) {
+    // Sportmonks returns 200 with empty data both for unknown fixtures and for
+    // fixtures that simply carry no odds (or none matching the filters), so
+    // disambiguate before reporting an empty result.
+    await assertFixtureExists(fixtureId);
+    return { data: rows, meta: buildListMeta(0, limit, false) };
+  }
+
+  // The odds endpoints return the full set in one response (no pagination;
+  // thousands of entries for a well-covered fixture), so sort before capping
+  // to keep truncation deterministic and surface the headline market
+  // (market 1, Fulltime Result) first.
+  rows.sort((left, right) => {
+    const leftMarket = left.market_id ?? Number.MAX_SAFE_INTEGER;
+    const rightMarket = right.market_id ?? Number.MAX_SAFE_INTEGER;
+    if (leftMarket !== rightMarket) return leftMarket - rightMarket;
+    const leftBookmaker = left.bookmaker_id ?? Number.MAX_SAFE_INTEGER;
+    const rightBookmaker = right.bookmaker_id ?? Number.MAX_SAFE_INTEGER;
+    if (leftBookmaker !== rightBookmaker) return leftBookmaker - rightBookmaker;
+    return (left.label ?? "").localeCompare(right.label ?? "");
+  });
+
+  const upstreamHasMore = getBoolean(payload, ["pagination", "has_more"]);
+  const data = rows.slice(0, limit);
+  const truncatedHere = rows.length > data.length;
+  return {
+    data,
+    meta: buildListMeta(data.length, limit, upstreamHasMore === true || truncatedHere),
+  };
+}
+
+async function getOdds(
+  fixtureId: number,
+  type: OddsFeedType,
+  limit: number,
+  marketId?: number,
+  bookmakerId?: number,
+) {
+  const { data, meta } = await fetchOdds(fixtureId, type, limit, marketId, bookmakerId);
+  return jsonResponse(listResponse(data, meta));
+}
+
+function getSeasonStatValue(detail: unknown): unknown {
+  // Detail values are heterogeneous: {total: 43}, {value: "7.01"},
+  // {count, average}, {all/home/away splits}, ... Unwrap single-key objects
+  // holding a scalar so the common case reads as a plain number; keep
+  // multi-key objects raw because every key carries information.
+  const value = readPath(detail, ["value"]);
+  if (isRecord(value)) {
+    const keys = Object.keys(value);
+    if (keys.length === 1 && isScalar(value[keys[0]])) {
+      return value[keys[0]];
+    }
+    return value;
+  }
+
+  return isScalar(value) ? value : null;
+}
+
+function mapSeasonStatsRow(
+  record: unknown,
+  entityType: SeasonStatsEntityType,
+  statTypes: string[],
+) {
+  const stats: Record<string, unknown> = {};
+  for (const detail of toRecordArray(readPath(record, ["details"]))) {
+    const label = getTypeLookupLabel(getNumber(detail, ["type_id"]));
+    if (label === null) {
+      continue;
+    }
+
+    const key = toSnakeCaseKey(label);
+    if (!statTypes.includes(key)) {
+      continue;
+    }
+
+    stats[key] = getSeasonStatValue(detail);
+  }
+
+  const entity =
+    entityType === "player"
+      ? toRecordArray(readPath(record, ["player"]))[0] ?? null
+      : toRecordArray(readPath(record, ["team"]))[0] ?? null;
+
+  const row: JsonRecord = {
+    entity_id:
+      getNumber(record, [entityType === "player" ? "player_id" : "team_id"]) ??
+      getNumber(entity, ["id"]),
+    entity_name: getPreferredName(entity),
+    entity_type: entityType,
+    season_id: getNumber(record, ["season_id"]),
+    season_name: getPreferredName(readPath(record, ["season"])),
+    stats,
+  };
+
+  if (entityType === "player") {
+    // A player's season stats are per club; expose which club this row covers
+    // so mid-season transfers (one row per club) stay distinguishable.
+    row.team = {
+      id: getNumber(record, ["team_id"]),
+      name: getPreferredName(readPath(record, ["team"])),
+    };
+  }
+
+  return row;
+}
+
+async function fetchSeasonStats(
+  entityId: number,
+  entityType: SeasonStatsEntityType,
+  seasonId: number,
+  statTypes?: string[],
+) {
+  const appliedStatTypes =
+    statTypes ?? (entityType === "player" ? DEFAULT_PLAYER_STAT_TYPES : DEFAULT_TEAM_STAT_TYPES);
+
+  const endpoint =
+    entityType === "player"
+      ? `/statistics/seasons/players/${entityId}`
+      : `/statistics/seasons/teams/${entityId}`;
+  const seasonFilter =
+    entityType === "player" ? `playerstatisticSeasons:${seasonId}` : `teamstatisticSeasons:${seasonId}`;
+  const include = entityType === "player" ? "player;team;season" : "team;season";
+
+  const payload = await apiRequest(endpoint, {
+    include,
+    filters: seasonFilter,
+    per_page: 50,
+  });
+
+  const items = getResponseItems(payload);
+
+  const buildMeta = (returned: number, upstreamHasMore: boolean | null) => {
+    const meta = buildListMeta(returned, MAX_SEASON_STATS_ROWS, upstreamHasMore);
+    meta.stat_types = appliedStatTypes;
+    return meta;
+  };
+
+  if (items.length === 0) {
+    // Sportmonks returns 200 with empty data both for unknown entities and for
+    // seasons the entity has no statistics in, so disambiguate before
+    // reporting an empty result. An unknown season also lands here — the
+    // caller can verify season ids via get_historic_seasons.
+    await getEntityReference(entityId, entityType);
+    return { data: [], meta: buildMeta(0, false) };
+  }
+
+  const rows = items
+    .map((record) => mapSeasonStatsRow(record, entityType, appliedStatTypes))
+    .filter((row) => row.entity_id !== null || row.season_id !== null);
+
+  const upstreamHasMore = getBoolean(payload, ["pagination", "has_more"]);
+  const data = rows.slice(0, MAX_SEASON_STATS_ROWS);
+  const truncatedHere = rows.length > data.length;
+  return {
+    data,
+    meta: buildMeta(data.length, upstreamHasMore === true || truncatedHere),
+  };
+}
+
+async function getSeasonStats(
+  entityId: number,
+  entityType: SeasonStatsEntityType,
+  seasonId: number,
+  statTypes?: string[],
+) {
+  const { data, meta } = await fetchSeasonStats(entityId, entityType, seasonId, statTypes);
+  return jsonResponse(listResponse(data, meta));
+}
+
+async function fetchFixtureLineupStats(
+  fixtureId: number,
+  playerIds?: number[],
+  statTypes?: string[],
+) {
+  const appliedStatTypes = statTypes ?? DEFAULT_LINEUP_STAT_TYPES;
+  const statTypeIds = resolveStatTypeIds(appliedStatTypes);
+
+  // An unfiltered fixture carries ~900 detail rows across ~60 stat types, so
+  // push the stat filter upstream via lineupdetailTypes. When no requested
+  // name resolves to a known type, skip the details include entirely — the
+  // stats objects would be empty either way.
+  const params: Record<string, ParamValue> = {
+    include: statTypeIds.length > 0 ? "lineups.details;participants" : "lineups;participants",
+  };
+  if (statTypeIds.length > 0) {
+    params.filters = `lineupdetailTypes:${statTypeIds.join(",")}`;
+  }
+
+  const notFound = new SportmonksToolError(
+    "not_found",
+    `Fixture ${fixtureId} was not found in Sportmonks.`,
+    "Verify the fixture id is correct and available in your Sportmonks subscription. Use get_matches to find a valid fixture id.",
+  );
+
+  let payload: unknown;
+  try {
+    payload = await apiRequest(`/fixtures/${fixtureId}`, params);
+  } catch (error) {
+    // Match assertFixtureExists: the generic 404 mapping recommends the
+    // 'search' tool, which cannot find fixture ids.
+    if (error instanceof SportmonksToolError && error.kind === "not_found") {
+      throw notFound;
+    }
+    throw error;
+  }
+
+  const fixture = getResponseItems(payload)[0] ?? null;
+  const lineups = toRecordArray(readPath(fixture, ["lineups"]));
+
+  const buildMeta = (returned: number, possiblyMore: boolean) => {
+    const meta = buildListMeta(returned, MAX_LINEUP_STATS_ROWS, possiblyMore);
+    meta.stat_types = appliedStatTypes;
+    return meta;
+  };
+
+  if (fixture === null || getNumber(fixture, ["id"]) === null) {
+    throw notFound;
+  }
+
+  if (lineups.length === 0) {
+    // The fixture exists but carries no lineup data (not announced yet, or
+    // not covered for this league/tier).
+    return { data: [], meta: buildMeta(0, false) };
+  }
+
+  const teamNameById = new Map(
+    toRecordArray(readPath(fixture, ["participants"]))
+      .map((participant) => [getNumber(participant, ["id"]), getPreferredName(participant)] as const)
+      .filter(([id]) => id !== null),
+  );
+
+  const playerIdFilter = playerIds === undefined ? null : new Set(playerIds);
+  const rows = lineups
+    .filter(
+      (lineup) =>
+        playerIdFilter === null || playerIdFilter.has(getNumber(lineup, ["player_id"]) ?? -1),
+    )
+    .map((lineup) => {
+      const stats: Record<string, unknown> = {};
+      for (const detail of toRecordArray(readPath(lineup, ["details"]))) {
+        const label = getTypeLookupLabel(getNumber(detail, ["type_id"]));
+        if (label === null) {
+          continue;
+        }
+
+        const key = toSnakeCaseKey(label);
+        if (!appliedStatTypes.includes(key)) {
+          continue;
+        }
+
+        stats[key] = getStatisticValue(detail);
+      }
+
+      const teamId = getNumber(lineup, ["team_id"]);
+      return {
+        player_id: getNumber(lineup, ["player_id"]),
+        player_name: getString(lineup, ["player_name"])?.trim() ?? null,
+        team_id: teamId,
+        team_name: teamNameById.get(teamId) ?? null,
+        // lineup = starting XI, bench = substitute. Under the default filter
+        // (which includes minutes_played) a bench player with an empty stats
+        // object did not come on; with a narrower override, empty may just
+        // mean none of the requested stats were recorded.
+        type: getLineupType(lineup),
+        stats,
+      };
+    })
+    .filter((row) => row.player_id !== null);
+
+  const data = rows.slice(0, MAX_LINEUP_STATS_ROWS);
+  return { data, meta: buildMeta(data.length, rows.length > data.length) };
+}
+
+async function getFixtureLineupStats(
+  fixtureId: number,
+  playerIds?: number[],
+  statTypes?: string[],
+) {
+  const { data, meta } = await fetchFixtureLineupStats(fixtureId, playerIds, statTypes);
+  return jsonResponse(listResponse(data, meta));
+}
+
+interface PressureMeta {
+  returned: number;
+  cap: number;
+  possibly_more: boolean;
+  mode: PressureMode;
+}
+
+interface PressureTeam {
+  team_id: number | null;
+  team_name: string | null;
+}
+
+// One grouped minute: each team's pressure value (absent rows treated as 0,
+// since pressure is a relativity metric where "no row" means "not pressing").
+interface PressureMinute {
+  minute: number;
+  home: number;
+  away: number;
+}
+
+function groupPressureByMinute(
+  rows: JsonRecord[],
+  homeId: number | null,
+  awayId: number | null,
+): PressureMinute[] {
+  const byMinute = new Map<number, { home: number; away: number }>();
+  for (const row of rows) {
+    const minute = getNumber(row, ["minute"]);
+    const participantId = getNumber(row, ["participant_id"]);
+    const value = getNumber(row, ["pressure"]);
+    if (minute === null || participantId === null) {
+      continue;
+    }
+
+    const entry = byMinute.get(minute) ?? { home: 0, away: 0 };
+    // Rows arrive unordered and not always paired per minute, so accumulate
+    // into whichever side this participant is.
+    if (participantId === homeId) {
+      entry.home = value ?? 0;
+    } else if (participantId === awayId) {
+      entry.away = value ?? 0;
+    }
+    byMinute.set(minute, entry);
+  }
+
+  return [...byMinute.entries()]
+    .map(([minute, v]) => ({ minute, home: v.home, away: v.away }))
+    .sort((left, right) => left.minute - right.minute);
+}
+
+function buildPressureSummary(
+  minutes: PressureMinute[],
+  home: PressureTeam,
+  away: PressureTeam,
+) {
+  const peak = { home: 0, away: 0 };
+  const sum = { home: 0, away: 0 };
+  const led = { home: 0, away: 0 };
+
+  for (const m of minutes) {
+    peak.home = Math.max(peak.home, m.home);
+    peak.away = Math.max(peak.away, m.away);
+    sum.home += m.home;
+    sum.away += m.away;
+    if (m.home > m.away) led.home += 1;
+    else if (m.away > m.home) led.away += 1;
+    // equal (e.g. both 0) counts toward neither team's dominance share.
+  }
+
+  const total = minutes.length;
+  const round2 = (value: number) => Math.round(value * 100) / 100;
+  const share = (count: number) => (total === 0 ? 0 : round2((count / total) * 100));
+
+  // A swing = the leading team changes from the previous led minute. Rank by
+  // how decisively the new leader took over (their pressure), keep the top few,
+  // then present chronologically.
+  const swings: Array<{ minute: number; team_id: number | null; team_name: string | null; pressure: number }> = [];
+  let lastLeader: "home" | "away" | null = null;
+  for (const m of minutes) {
+    const leader: "home" | "away" | null =
+      m.home > m.away ? "home" : m.away > m.home ? "away" : null;
+    if (leader !== null && lastLeader !== null && leader !== lastLeader) {
+      const team = leader === "home" ? home : away;
+      swings.push({
+        minute: m.minute,
+        team_id: team.team_id,
+        team_name: team.team_name,
+        pressure: leader === "home" ? m.home : m.away,
+      });
+    }
+    if (leader !== null) {
+      lastLeader = leader;
+    }
+  }
+
+  const topSwings = [...swings]
+    .sort((left, right) => right.pressure - left.pressure)
+    .slice(0, MAX_PRESSURE_SWINGS)
+    .sort((left, right) => left.minute - right.minute);
+
+  return {
+    teams: [
+      {
+        team_id: home.team_id,
+        team_name: home.team_name,
+        peak_pressure: round2(peak.home),
+        average_pressure: total === 0 ? 0 : round2(sum.home / total),
+        dominance_share: share(led.home),
+      },
+      {
+        team_id: away.team_id,
+        team_name: away.team_name,
+        peak_pressure: round2(peak.away),
+        average_pressure: total === 0 ? 0 : round2(sum.away / total),
+        dominance_share: share(led.away),
+      },
+    ],
+    swings: topSwings,
+  };
+}
+
+async function fetchPressureIndex(fixtureId: number, mode: PressureMode) {
+  const notFound = new SportmonksToolError(
+    "not_found",
+    `Fixture ${fixtureId} was not found in Sportmonks.`,
+    "Verify the fixture id is correct and available in your Sportmonks subscription. Use get_matches to find a valid fixture id.",
+  );
+
+  let payload: unknown;
+  try {
+    payload = await apiRequest(`/fixtures/${fixtureId}`, {
+      include: "pressure;participants",
+    });
+  } catch (error) {
+    if (error instanceof SportmonksToolError && error.kind === "not_found") {
+      throw notFound;
+    }
+    throw error;
+  }
+
+  const fixture = getResponseItems(payload)[0] ?? null;
+  if (fixture === null || getNumber(fixture, ["id"]) === null) {
+    throw notFound;
+  }
+
+  const { home, away } = getHomeAndAwayParticipants(fixture);
+  const homeTeam: PressureTeam = { team_id: getNumber(home, ["id"]), team_name: getPreferredName(home) };
+  const awayTeam: PressureTeam = { team_id: getNumber(away, ["id"]), team_name: getPreferredName(away) };
+
+  const rows = toRecordArray(readPath(fixture, ["pressure"]));
+  const minutes = groupPressureByMinute(rows, homeTeam.team_id, awayTeam.team_id);
+
+  if (mode === "timeline") {
+    const data = minutes.slice(0, MAX_PRESSURE_TIMELINE_ROWS).map((m) => ({
+      minute: m.minute,
+      home: m.home,
+      away: m.away,
+    }));
+    const meta: PressureMeta = {
+      returned: data.length,
+      cap: MAX_PRESSURE_TIMELINE_ROWS,
+      possibly_more: minutes.length > MAX_PRESSURE_TIMELINE_ROWS,
+      mode,
+    };
+    // teams[0] is home (the `home` key in each entry), teams[1] is away — so
+    // consumers resolve the positional values to names without per-entry repeats.
+    return { data: { teams: [homeTeam, awayTeam], timeline: data }, meta };
+  }
+
+  const summary = buildPressureSummary(minutes, homeTeam, awayTeam);
+  const meta: PressureMeta = {
+    returned: minutes.length,
+    cap: MAX_PRESSURE_TIMELINE_ROWS,
+    // Summary aggregates the whole recorded series, so nothing is truncated.
+    possibly_more: false,
+    mode,
+  };
+  return { data: summary, meta };
+}
+
+async function getPressureIndex(fixtureId: number, mode: PressureMode) {
+  const { data, meta } = await fetchPressureIndex(fixtureId, mode);
+  return jsonResponse({ data, meta });
+}
+
+function mapTransfer(record: unknown, type: TransferType) {
+  // Confirmed transfers and rumours share these fields; the rumour-only extras
+  // (probability, source, currency) are dropped to keep one uniform shape.
+  // `transfer_kind` resolves type_id (e.g. Transfer, Loan, End of loan, Free);
+  // `type` echoes which feed the row came from.
+  const player = readPath(record, ["player"]);
+  const fromTeam = readPath(record, ["fromteam"]);
+  const toTeam = readPath(record, ["toteam"]);
+
+  return {
+    id: getNumber(record, ["id"]),
+    player: {
+      id: getNumber(player, ["id"]) ?? getNumber(record, ["player_id"]),
+      name: getPreferredName(player),
+    },
+    from_team: {
+      id: getNumber(fromTeam, ["id"]) ?? getNumber(record, ["from_team_id"]),
+      name: getPreferredName(fromTeam),
+    },
+    to_team: {
+      id: getNumber(toTeam, ["id"]) ?? getNumber(record, ["to_team_id"]),
+      name: getPreferredName(toTeam),
+    },
+    type,
+    transfer_kind: getTypeLookupLabel(getNumber(record, ["type_id"])),
+    // Undisclosed fees come back null; keep them null rather than coercing to 0.
+    fee: getNumber(record, ["amount"]),
+    date: getString(record, ["date"]),
+  };
+}
+
+function resolveTransferEndpoint(
+  type: TransferType,
+  timeframe: TransferTimeframe,
+  entityType: TransferEntityType | undefined,
+  id: number | undefined,
+  startDate: string | undefined,
+  endDate: string | undefined,
+) {
+  const base = type === "rumour" ? "/transfer-rumours" : "/transfers";
+
+  if (id !== undefined) {
+    return entityType === "team" ? `${base}/teams/${id}` : `${base}/players/${id}`;
+  }
+
+  if (timeframe === "date_range") {
+    return `${base}/between/${startDate}/${endDate}`;
+  }
+
+  // Latest market activity. Confirmed transfers have a dedicated /latest
+  // endpoint; rumours don't, so fall back to the (cap-bounded) full feed.
+  return type === "rumour" ? base : `${base}/latest`;
+}
+
+async function fetchTransfers(params: {
+  id?: number;
+  entityType?: TransferEntityType;
+  type: TransferType;
+  timeframe: TransferTimeframe;
+  startDate?: string;
+  endDate?: string;
+}) {
+  const endpoint = resolveTransferEndpoint(
+    params.type,
+    params.timeframe,
+    params.entityType,
+    params.id,
+    params.startDate,
+    params.endDate,
+  );
+
+  let payload: unknown;
+  try {
+    payload = await apiRequest(endpoint, {
+      include: "player;fromteam;toteam",
+      per_page: MAX_TRANSFER_RESULTS,
+    });
+  } catch (error) {
+    // Rumours are a separate add-on; surface a clear, actionable error rather
+    // than the generic auth message when the subscription lacks them.
+    if (
+      params.type === "rumour" &&
+      error instanceof SportmonksToolError &&
+      error.kind === "authentication_error"
+    ) {
+      throw new SportmonksToolError(
+        "authentication_error",
+        "Sportmonks rejected the transfer rumours request. Rumours require a subscription with the transfer rumours add-on.",
+        "Retry with type='confirmed' for confirmed transfers, or upgrade the Sportmonks subscription to include transfer rumours.",
+        error.details,
+      );
+    }
+    throw error;
+  }
+
+  const upstreamHasMore = getBoolean(payload, ["pagination", "has_more"]);
+  const items = getResponseItems(payload);
+  const data = items
+    .slice(0, MAX_TRANSFER_RESULTS)
+    .map((record) => mapTransfer(record, params.type))
+    .filter((row) => row.id !== null);
+  const truncatedHere = items.length > data.length;
+  return {
+    data,
+    meta: buildListMeta(data.length, MAX_TRANSFER_RESULTS, upstreamHasMore === true || truncatedHere),
+  };
+}
+
+async function getTransfers(params: {
+  id?: number;
+  entityType?: TransferEntityType;
+  type: TransferType;
+  timeframe: TransferTimeframe;
+  startDate?: string;
+  endDate?: string;
+}) {
+  const { data, meta } = await fetchTransfers(params);
+  return jsonResponse(listResponse(data, meta));
+}
+
+async function getEntityReference(id: number, type: EntityType) {
   // Sportmonks doesn't reliably 404 on unknown ids — depending on plan it can
   // return 200 with `data: []`, `data: {}`, or `data: {/* placeholder with no id */}`.
   // We verify the result actually contains an entity with a numeric `id`;
   // anything else surfaces as `not_found` with a clear how-to-fix message.
-  const path = type === "team" ? `/teams/${id}` : `/leagues/${id}`;
-  const label = type === "team" ? "Team" : "League";
+  const path =
+    type === "team"
+      ? `/teams/${id}`
+      : type === "player"
+        ? `/players/${id}`
+        : type === "coach"
+          ? `/coaches/${id}`
+          : `/leagues/${id}`;
+  const label =
+    type === "team" ? "Team" : type === "player" ? "Player" : type === "coach" ? "Coach" : "League";
   const payload = await apiRequest(path);
   const item = getSingleResponseItem(payload, label);
   if (getNumber(item, ["id"]) === null) {
@@ -1711,7 +2773,7 @@ async function getEntityReference(id: number, type: MatchEntityType) {
 const tools: ToolDefinition[] = [
   {
     name: "search",
-    description: "Search Sportmonks players, teams, leagues, or all supported entity types.",
+    description: "Search Sportmonks players, teams, leagues, coaches, or all supported entity types.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1721,7 +2783,7 @@ const tools: ToolDefinition[] = [
         },
         type: {
           type: "string",
-          enum: ["player", "team", "league", "all"],
+          enum: ["player", "team", "league", "coach", "all"],
           description: "Entity type to search. Defaults to 'all'.",
         },
       },
@@ -1730,7 +2792,12 @@ const tools: ToolDefinition[] = [
     async handler(args) {
       await initializeReferenceData();
       const query = requireNonEmptyString(args.query, "query");
-      const type = requireEnumValue(args.type, "type", ["player", "team", "league", "all"], "all");
+      const type = requireEnumValue(
+        args.type,
+        "type",
+        ["player", "team", "league", "coach", "all"],
+        "all",
+      );
       return searchEntities(query, type);
     },
   },
@@ -1789,6 +2856,25 @@ const tools: ToolDefinition[] = [
       await initializeReferenceData();
       const id = requirePositiveInteger(args.id, "id");
       return getLeague(id);
+    },
+  },
+  {
+    name: "get_coach",
+    description: "Gets coach details by Sportmonks coach id.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: {
+          type: "integer",
+          description: "Sportmonks coach id.",
+        },
+      },
+      required: ["id"],
+    },
+    async handler(args) {
+      await initializeReferenceData();
+      const id = requirePositiveInteger(args.id, "id");
+      return getCoach(id);
     },
   },
   {
@@ -1873,7 +2959,7 @@ const tools: ToolDefinition[] = [
   {
     name: "get_fixture_details",
     description:
-      "Gets detailed fixture data with optional whitelisted expansions for lineups, events, and statistics.",
+      "Gets detailed fixture data with optional whitelisted expansions for lineups, events, statistics, predictions, and xg. Predictions return curated match probabilities (percentages, 0-100) and value bets, and require a Sportmonks subscription with the predictions add-on. The xg include returns Expected Goals (xG) and Expected Goals on Target (xGoT) per team for finished and live fixtures; it is an empty array for upcoming fixtures or fixtures without xG coverage.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1885,10 +2971,10 @@ const tools: ToolDefinition[] = [
           type: "array",
           items: {
             type: "string",
-            enum: ["lineups", "events", "statistics"],
+            enum: ["lineups", "events", "statistics", "predictions", "xg"],
           },
           description:
-            "Optional subset of ['lineups', 'events', 'statistics'] to expand on top of the base fixture data.",
+            "Optional subset of ['lineups', 'events', 'statistics', 'predictions', 'xg'] to expand on top of the base fixture data.",
         },
       },
       required: ["fixture_id"],
@@ -1899,7 +2985,7 @@ const tools: ToolDefinition[] = [
       const includes = requireEnumArray(
         args.includes,
         "includes",
-        ["lineups", "events", "statistics"],
+        ["lineups", "events", "statistics", "predictions", "xg"],
       );
       return getFixtureDetails(fixtureId, includes);
     },
@@ -1972,6 +3058,264 @@ const tools: ToolDefinition[] = [
       const type = requireEnumValue(args.type, "type", ["goals", "assists", "cards"]);
       const limit = requirePositiveIntegerWithMaximum(args.limit, "limit", 10, 25);
       return getTopscorers(seasonId, type, limit);
+    },
+  },
+  {
+    name: "get_odds",
+    description:
+      "Gets pre-match or premium betting odds for a fixture. An unfiltered fixture can carry thousands of odds entries upstream, so results are capped at 'limit' (default 50, max 200; sorted by market, then bookmaker); narrow with market_id and/or bookmaker_id or raise the limit when meta.possibly_more is true. An empty data array means the fixture exists but has no odds for the requested feed type and filters.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        fixture_id: {
+          type: "integer",
+          description: "Sportmonks fixture id.",
+        },
+        type: {
+          type: "string",
+          enum: ["prematch", "premium"],
+          description:
+            "Odds feed to query. Defaults to 'prematch'. 'premium' requires a subscription that includes the premium odds feed.",
+        },
+        market_id: {
+          type: "integer",
+          description: "Optional Sportmonks market id to filter to a single market (e.g. 1 for Fulltime Result).",
+        },
+        bookmaker_id: {
+          type: "integer",
+          description: "Optional Sportmonks bookmaker id to filter to a single bookmaker.",
+        },
+        limit: {
+          type: "integer",
+          description: "Optional result limit. Defaults to 50 and cannot exceed 200.",
+        },
+      },
+      required: ["fixture_id"],
+    },
+    async handler(args) {
+      await initializeReferenceData();
+      const fixtureId = requirePositiveInteger(args.fixture_id, "fixture_id");
+      const type = requireEnumValue(args.type, "type", ["prematch", "premium"], "prematch");
+      const marketId = requireOptionalPositiveInteger(args.market_id, "market_id");
+      const bookmakerId = requireOptionalPositiveInteger(args.bookmaker_id, "bookmaker_id");
+      const limit = requirePositiveIntegerWithMaximum(
+        args.limit,
+        "limit",
+        DEFAULT_ODDS_RESULTS,
+        MAX_ODDS_RESULTS,
+      );
+      return getOdds(fixtureId, type, limit, marketId, bookmakerId);
+    },
+  },
+  {
+    name: "get_season_stats",
+    description:
+      "Gets seasonal statistics for a player or team. A curated default stat filter is applied per entity type (player: goals, assists, minutes_played, appearances, shots_on_target, passes, key_passes, tackles, rating; team: goals, goals_conceded, team_wins, team_draws, team_lost, cleansheets, shots, pass_stats, ball_possession). Override with stat_types using snake_case stat names. A stat missing from the stats object means it is not tracked for the entity's league or data tier, or its value is zero — Sportmonks omits zero-value stats. An empty data array means the entity exists but has no statistics for that season — verify season ids with get_historic_seasons.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        entity_id: {
+          type: "integer",
+          description: "Sportmonks player id or team id.",
+        },
+        entity_type: {
+          type: "string",
+          enum: ["player", "team"],
+          description: "Whether entity_id refers to a player or a team.",
+        },
+        season_id: {
+          type: "integer",
+          description: "Sportmonks season id. Use get_historic_seasons to find one.",
+        },
+        stat_types: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Optional stat names to return instead of the per-entity-type defaults, e.g. ['goals', 'big_chances_created']. Names are snake_case of the Sportmonks type name.",
+        },
+      },
+      required: ["entity_id", "entity_type", "season_id"],
+    },
+    async handler(args) {
+      await initializeReferenceData();
+      const entityId = requirePositiveInteger(args.entity_id, "entity_id");
+      const entityType = requireEnumValue(args.entity_type, "entity_type", ["player", "team"]);
+      const seasonId = requirePositiveInteger(args.season_id, "season_id");
+      const statTypes = requireOptionalStatTypes(args.stat_types, "stat_types");
+      return getSeasonStats(entityId, entityType, seasonId, statTypes);
+    },
+  },
+  {
+    name: "get_fixture_lineup_stats",
+    description:
+      "Gets player-level statistics for a fixture (both squads including bench). Defaults to goals, assists, and minutes_played per player; override with stat_types using snake_case stat names (e.g. ['rating', 'passes']). Sportmonks omits zero-value stats, so a stat missing from a player's stats object means not-tracked or zero; under the default filter (which includes minutes_played) a bench player with an empty stats object did not come on. An empty data array means the fixture exists but has no lineup data (not announced yet, or not covered for the league) — or, when player_ids is set, that none of the requested players are in the lineups.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        fixture_id: {
+          type: "integer",
+          description: "Sportmonks fixture id.",
+        },
+        player_ids: {
+          type: "array",
+          items: { type: "integer" },
+          description: "Optional Sportmonks player ids to filter to specific players.",
+        },
+        stat_types: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Optional stat names to return instead of the defaults (goals, assists, minutes_played). Names are snake_case of the Sportmonks type name.",
+        },
+      },
+      required: ["fixture_id"],
+    },
+    async handler(args) {
+      await initializeReferenceData();
+      const fixtureId = requirePositiveInteger(args.fixture_id, "fixture_id");
+      const playerIds = requireOptionalPositiveIntegerArray(args.player_ids, "player_ids");
+      const statTypes = requireOptionalStatTypes(args.stat_types, "stat_types");
+      return getFixtureLineupStats(fixtureId, playerIds, statTypes);
+    },
+  },
+  {
+    name: "get_pressure_index",
+    description:
+      "Gets the Sportmonks Pressure Index for a fixture — a real-time, per-minute metric of which team is dominating. mode='summary' (default) returns per-team peak/average pressure, dominance share (% of recorded minutes each team led), and the top momentum-swing minutes. mode='timeline' returns the cleaned per-minute series (one entry per minute with both teams' values, sorted by minute). Teams are resolved to names. Works for live (partial series) and finished fixtures; returns an empty series for upcoming fixtures or fixtures without pressure data.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        fixture_id: {
+          type: "integer",
+          description: "Sportmonks fixture id.",
+        },
+        mode: {
+          type: "string",
+          enum: ["summary", "timeline"],
+          description:
+            "'summary' (default) for per-team aggregates and swing minutes; 'timeline' for the full per-minute series.",
+        },
+      },
+      required: ["fixture_id"],
+    },
+    async handler(args) {
+      await initializeReferenceData();
+      const fixtureId = requirePositiveInteger(args.fixture_id, "fixture_id");
+      const mode = requireEnumValue(args.mode, "mode", ["summary", "timeline"], "summary");
+      return getPressureIndex(fixtureId, mode);
+    },
+  },
+  {
+    name: "get_transfers",
+    description:
+      "Gets football transfers: latest market activity, transfers for a team or player, or transfers within a date range. type='confirmed' (default) or type='rumour' (rumours need a subscription add-on). Provide id with entity_type to scope to a team/player (always the latest feed — a date range cannot be combined with an id). For an unscoped query you must set timeframe explicitly: timeframe='latest' for recent market activity, or timeframe='date_range' with start_date and end_date (window must not exceed 31 days — the Sportmonks limit). Results are capped at 25; fee is null for undisclosed deals.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: {
+          type: "integer",
+          description: "Optional Sportmonks team id or player id to scope the transfers to.",
+        },
+        entity_type: {
+          type: "string",
+          enum: ["team", "player"],
+          description: "Whether id refers to a team or a player. Required when id is provided.",
+        },
+        type: {
+          type: "string",
+          enum: ["confirmed", "rumour"],
+          description: "Confirmed transfers (default) or transfer rumours (rumours require an add-on).",
+        },
+        timeframe: {
+          type: "string",
+          enum: ["latest", "date_range"],
+          description:
+            "'latest' for recent market activity, or 'date_range' with start_date/end_date. Defaults to 'latest' when an id is provided; required for unscoped (no id) queries.",
+        },
+        start_date: {
+          type: "string",
+          description: "Start of the date range (YYYY-MM-DD). Required when timeframe='date_range'.",
+        },
+        end_date: {
+          type: "string",
+          description: "End of the date range (YYYY-MM-DD). Required when timeframe='date_range'; must be within 31 days of start_date (Sportmonks limit).",
+        },
+      },
+      required: [],
+    },
+    async handler(args) {
+      await initializeReferenceData();
+      const id = requireOptionalPositiveInteger(args.id, "id");
+      const type = requireEnumValue(args.type, "type", ["confirmed", "rumour"], "confirmed");
+
+      if (id !== undefined && args.entity_type === undefined) {
+        throw new SportmonksToolError(
+          "validation_error",
+          "The 'entity_type' field is required when 'id' is provided.",
+          "Call the tool again with entity_type set to 'team' or 'player', or omit id to query latest/date-range transfers.",
+        );
+      }
+
+      const entityType =
+        id === undefined
+          ? undefined
+          : requireEnumValue(args.entity_type, "entity_type", ["team", "player"]);
+
+      // An unscoped call (no id) must name its timeframe — this is the guard
+      // against unbounded queries. A scoped call (id present) defaults to latest.
+      if (id === undefined && args.timeframe === undefined) {
+        throw new SportmonksToolError(
+          "validation_error",
+          "Provide either an id (with entity_type) or a timeframe.",
+          "Call the tool again with an id and entity_type, or set timeframe to 'latest' or 'date_range' (date_range also needs start_date and end_date).",
+        );
+      }
+
+      const timeframe = requireEnumValue(
+        args.timeframe,
+        "timeframe",
+        ["latest", "date_range"],
+        "latest",
+      );
+
+      // Sportmonks has no date-scoped team/player transfer endpoint, so an
+      // id + date_range combination cannot be honored. Reject it rather than
+      // silently dropping the date window and returning the full scoped feed.
+      if (id !== undefined && timeframe === "date_range") {
+        throw new SportmonksToolError(
+          "validation_error",
+          "A date range cannot be combined with an id — Sportmonks has no date-scoped team or player transfer endpoint.",
+          "Call the tool again with the id (entity_type) and timeframe='latest', or omit the id and use timeframe='date_range' with start_date and end_date.",
+        );
+      }
+
+      let startDate: string | undefined;
+      let endDate: string | undefined;
+      if (timeframe === "date_range") {
+        startDate = requireDateString(args.start_date, "start_date");
+        endDate = requireDateString(args.end_date, "end_date");
+
+        const start = new Date(`${startDate}T00:00:00Z`);
+        const end = new Date(`${endDate}T00:00:00Z`);
+        if (end.getTime() < start.getTime()) {
+          throw new SportmonksToolError(
+            "validation_error",
+            "The 'end_date' must be on or after 'start_date'.",
+            "Call the tool again with end_date on or after start_date.",
+          );
+        }
+
+        const diffDays = Math.round((end.getTime() - start.getTime()) / 86_400_000);
+        if (diffDays > MAX_TRANSFER_RANGE_DAYS) {
+          throw new SportmonksToolError(
+            "validation_error",
+            `The date range must not exceed ${MAX_TRANSFER_RANGE_DAYS} days (Sportmonks limits transfer date ranges to ${MAX_TRANSFER_RANGE_DAYS} days).`,
+            `Call the tool again with start_date and end_date no more than ${MAX_TRANSFER_RANGE_DAYS} days apart.`,
+          );
+        }
+      }
+
+      return getTransfers({ id, entityType, type, timeframe, startDate, endDate });
     },
   },
 ];
@@ -2402,10 +3746,19 @@ if (process.env.VITEST !== "true" && process.env.VITEST !== "1") {
 // ── Exports (for testing) ────────────────────────────────────────────────────
 
 export {
+  DEFAULT_LINEUP_STAT_TYPES,
+  DEFAULT_ODDS_RESULTS,
+  DEFAULT_PLAYER_STAT_TYPES,
+  DEFAULT_TEAM_STAT_TYPES,
   DOCUMENTATION_RESOURCE_TEXT,
   FOOTBALL_API_BASE_URL,
+  MAX_LINEUP_STATS_ROWS,
   MAX_MATCH_RESULTS,
+  MAX_ODDS_RESULTS,
+  MAX_PRESSURE_TIMELINE_ROWS,
+  MAX_SEASON_STATS_ROWS,
   MAX_SEARCH_RESULTS,
+  MAX_TRANSFER_RESULTS,
   apiRequest,
   errorResponse,
   getPrompt,

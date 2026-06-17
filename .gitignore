@@ -4,3 +4,4 @@ dist/
 .env
 .npmrc
 .claude/settings.local.json
+openapi_spec.json
