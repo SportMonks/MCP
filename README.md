@@ -17,7 +17,7 @@ This server exposes focused Sportmonks Football API tools for search, player/tea
 - Pagination metadata (`returned`, `cap`, `possibly_more`, `date_window`) on every list-style tool so the LLM knows when results were truncated
 - Built on official Sportmonks Football API 3.0 endpoints
 - Player current-team resolution iterates candidate clubs and rejects national-team relations, so `current_team` returns the player's club rather than their country
-- Invalid ids for single-entity lookups (`get_player`, `get_team`, `get_league`, `get_coach`, `get_referee`, `get_venue`) — and for `get_standings` and `get_historic_seasons` — surface as typed `not_found` errors instead of all-null rows; partial-coverage tools (`get_rivals`, `get_totw`) return a clean empty result for unknown or uncovered ids
+- Invalid ids for single-entity and fixture lookups (`get_player`, `get_team`, `get_league`, `get_coach`, `get_referee`, `get_venue`, `get_fixture_details`, `get_match_preview`) — and for `get_standings` and `get_historic_seasons` — surface as typed `not_found` errors instead of all-null rows; partial-coverage tools (`get_rivals`, `get_totw`) return a clean empty result for unknown or uncovered ids
 - Types and states are loaded on startup and reused for shared mappings (broad and detailed positions are resolved to readable names via this cache)
 
 ## Configuration
