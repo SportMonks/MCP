@@ -123,6 +123,7 @@ Inputs:
 Output:
 - `{ data, meta }` envelope; `data` contains up to 25 items sorted alphabetically by name
 - Each item contains `id`, `entity_type` (`player`, `team`, `league`, `coach`, `referee`, or `venue`), `name`, and `country` (`country` may be `null` when Sportmonks doesn't provide one; useful for disambiguating generic names like the dozen leagues called "Super League")
+- `meta` is `{ returned, cap, possibly_more }` (`cap` is 25); `possibly_more` is `true` when more matched upstream (across the queried entity endpoints) than the 25 returned
 
 ### `get_player`
 
@@ -329,7 +330,7 @@ Output:
 - `{ data, meta }` envelope; each row contains `entity_id`, `entity_name`, `entity_type`, `season_id`, `season_name`, and a `stats` object keyed by snake_case stat name
 - Player rows also contain `team` (`{ id, name }`) — a player's season stats are per club, so a mid-season transfer yields one row per club
 - Stat values mirror the upstream data: simple counters are unwrapped to plain numbers; richer stats (e.g. `goals` with penalty split, team stats with home/away splits, `rating` with average/highest/lowest) stay objects — so the same stat key can be a number for one entity and an object for another, depending on what Sportmonks tracks
-- `meta.stat_types` always reports the applied stat filter, whether default or user-supplied
+- `meta` is `{ returned, cap, possibly_more, stat_types }`; `meta.stat_types` always reports the applied stat filter, whether default or user-supplied
 - An empty `data` array means the entity exists but has no statistics for that season
 
 Default stat filters:
