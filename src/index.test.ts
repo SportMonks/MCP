@@ -84,6 +84,11 @@ function primeDefaultReferenceData() {
     [
       { id: 11, code: "lineup", developer_name: "lineup", name: "Lineup" },
       { id: 12, code: "bench", developer_name: "bench", name: "Bench" },
+      // Broad position types (resolved by get_totw via the types cache).
+      { id: 24, code: "goalkeeper", developer_name: "GOALKEEPER", name: "Goalkeeper" },
+      { id: 25, code: "defender", developer_name: "DEFENDER", name: "Defender" },
+      { id: 26, code: "midfielder", developer_name: "MIDFIELDER", name: "Midfielder" },
+      { id: 27, code: "attacker", developer_name: "ATTACKER", name: "Attacker" },
       { id: 129, code: "overall-matches-played", developer_name: "overall-matches-played" },
       { id: 130, code: "overall-won", developer_name: "overall-won" },
       { id: 131, code: "overall-draw", developer_name: "overall-draw" },
@@ -121,6 +126,11 @@ function primeDefaultReferenceData() {
       // Transfer kinds (resolved by get_transfers via the types cache).
       { id: 219, code: "transfer", developer_name: "TRANSFER", name: "Transfer" },
       { id: 9688, code: "end-of-loan", developer_name: "END_OF_LOAN", name: "End of loan" },
+      // Referee assignment roles (resolved by the get_fixture_details referees include).
+      { id: 6, code: "referee", developer_name: "REFEREE", name: "Referee" },
+      { id: 7, code: "referee-two", developer_name: "REFEREE_TWO", name: "1st Assistant" },
+      { id: 8, code: "referee-three", developer_name: "REFEREE_THREE", name: "2nd Assistant" },
+      { id: 9, code: "referee-four", developer_name: "REFEREE_FOUR", name: "4th Official" },
     ],
     [
       { id: 1, state: "NS", short_name: "NS", developer_name: "NOT_STARTED", name: "Not Started" },
@@ -140,6 +150,9 @@ describe("Tool Registry", () => {
     "get_team",
     "get_league",
     "get_coach",
+    "get_referee",
+    "get_venue",
+    "get_rivals",
     "get_squad",
     "get_matches",
     "get_match_preview",
@@ -152,10 +165,14 @@ describe("Tool Registry", () => {
     "get_fixture_lineup_stats",
     "get_pressure_index",
     "get_transfers",
+    "get_fixture_news",
+    "get_match_facts",
+    "get_commentaries",
+    "get_totw",
   ];
 
   it("registers the split player, team, and league tools without the old get_entity tool", () => {
-    expect(tools).toHaveLength(17);
+    expect(tools).toHaveLength(24);
     expect(tools.map((tool) => tool.name)).toEqual(expectedTools);
   });
 
@@ -165,6 +182,9 @@ describe("Tool Registry", () => {
     expect(toolMap.get("get_team")?.inputSchema.required).toEqual(["id"]);
     expect(toolMap.get("get_league")?.inputSchema.required).toEqual(["id"]);
     expect(toolMap.get("get_coach")?.inputSchema.required).toEqual(["id"]);
+    expect(toolMap.get("get_referee")?.inputSchema.required).toEqual(["id"]);
+    expect(toolMap.get("get_venue")?.inputSchema.required).toEqual(["id"]);
+    expect(toolMap.get("get_rivals")?.inputSchema.required).toEqual(["team_id"]);
     expect(toolMap.get("get_squad")?.inputSchema.required).toEqual(["team_id"]);
     expect(toolMap.get("get_matches")?.inputSchema.required).toEqual(["id", "type"]);
     expect(toolMap.get("get_match_preview")?.inputSchema.required).toEqual(["id"]);
@@ -181,13 +201,20 @@ describe("Tool Registry", () => {
     expect(toolMap.get("get_fixture_lineup_stats")?.inputSchema.required).toEqual(["fixture_id"]);
     expect(toolMap.get("get_pressure_index")?.inputSchema.required).toEqual(["fixture_id"]);
     expect(toolMap.get("get_transfers")?.inputSchema.required).toEqual([]);
+    expect(toolMap.get("get_fixture_news")?.inputSchema.required).toEqual(["fixture_id"]);
+    expect(toolMap.get("get_match_facts")?.inputSchema.required).toEqual(["fixture_id", "basis"]);
+    expect(toolMap.get("get_commentaries")?.inputSchema.required).toEqual(["fixture_id"]);
+    expect(toolMap.get("get_totw")?.inputSchema.required).toEqual(["league_id"]);
 
     expect(toolMap.get("get_player")?.inputSchema.properties.id).toMatchObject({ type: "integer" });
     expect(toolMap.get("get_team")?.inputSchema.properties.id).toMatchObject({ type: "integer" });
     expect(toolMap.get("get_league")?.inputSchema.properties.id).toMatchObject({ type: "integer" });
     expect(toolMap.get("get_coach")?.inputSchema.properties.id).toMatchObject({ type: "integer" });
+    expect(toolMap.get("get_referee")?.inputSchema.properties.id).toMatchObject({ type: "integer" });
+    expect(toolMap.get("get_venue")?.inputSchema.properties.id).toMatchObject({ type: "integer" });
+    expect(toolMap.get("get_rivals")?.inputSchema.properties.team_id).toMatchObject({ type: "integer" });
     expect(toolMap.get("search")?.inputSchema.properties.type).toMatchObject({
-      enum: ["player", "team", "league", "coach", "all"],
+      enum: ["player", "team", "league", "coach", "referee", "venue", "all"],
     });
     expect(toolMap.get("get_squad")?.inputSchema.properties.team_id).toMatchObject({ type: "integer" });
     expect(toolMap.get("get_matches")?.inputSchema.properties.id).toMatchObject({ type: "integer" });
@@ -215,7 +242,7 @@ describe("Tool Registry", () => {
     // The advertised includes enum and the handler whitelist are separate
     // literals — pin the schema side so they can't silently drift apart.
     expect(toolMap.get("get_fixture_details")?.inputSchema.properties.includes).toMatchObject({
-      items: { enum: ["lineups", "events", "statistics", "predictions", "xg"] },
+      items: { enum: ["lineups", "events", "statistics", "predictions", "xg", "referees", "tv_stations"] },
     });
     expect(toolMap.get("get_season_stats")?.inputSchema.properties.entity_id).toMatchObject({
       type: "integer",
@@ -243,6 +270,18 @@ describe("Tool Registry", () => {
     });
     expect(toolMap.get("get_transfers")?.inputSchema.properties.timeframe).toMatchObject({
       enum: ["latest", "date_range"],
+    });
+    expect(toolMap.get("get_fixture_news")?.inputSchema.properties.fixture_id).toMatchObject({
+      type: "integer",
+    });
+    expect(toolMap.get("get_fixture_news")?.inputSchema.properties.timing).toMatchObject({
+      enum: ["prematch", "postmatch", "both"],
+    });
+    expect(toolMap.get("get_match_facts")?.inputSchema.properties.basis).toMatchObject({
+      enum: ["h2h", "team"],
+    });
+    expect(toolMap.get("get_match_facts")?.inputSchema.properties.category).toMatchObject({
+      items: { enum: ["statistics", "streaks", "players", "coaches", "statistic_comparisons"] },
     });
   });
 });
@@ -380,13 +419,15 @@ describe("Tool Handlers", () => {
     vi.useRealTimers();
   });
 
-  it("search defaults to all entity types (including coaches) and caps results", async () => {
-    // Order matches the fan-out: player, team, league, coach.
+  it("search defaults to all entity types (including coaches, referees, venues) and caps results", async () => {
+    // Order matches the fan-out: player, team, league, coach, referee, venue.
     globalThis.fetch = mockFetchJson(
       { data: [{ id: 2, name: "Zed Player" }] },
       { data: [{ id: 3, name: "Arsenal" }] },
       { data: [{ id: 1, name: "Premier League" }] },
       { data: [{ id: 5, name: "Coach Bob" }] },
+      { data: [{ id: 7, name: "Ref Dave" }] },
+      { data: [{ id: 9, name: "Wembley" }] },
     );
 
     const result = await toolMap.get("search")!.handler({ query: "ars" });
@@ -396,11 +437,13 @@ describe("Tool Handlers", () => {
       { id: 3, entity_type: "team", name: "Arsenal", country: null },
       { id: 5, entity_type: "coach", name: "Coach Bob", country: null },
       { id: 1, entity_type: "league", name: "Premier League", country: null },
+      { id: 7, entity_type: "referee", name: "Ref Dave", country: null },
+      { id: 9, entity_type: "venue", name: "Wembley", country: null },
       { id: 2, entity_type: "player", name: "Zed Player", country: null },
     ]);
-    expect(parsed.meta).toMatchObject({ returned: 4, cap: MAX_SEARCH_RESULTS, possibly_more: false });
+    expect(parsed.meta).toMatchObject({ returned: 6, cap: MAX_SEARCH_RESULTS, possibly_more: false });
 
-    expect(globalThis.fetch).toHaveBeenCalledTimes(4);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(6);
 
     const firstUrl = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
     expect(firstUrl.pathname).toBe("/v3/football/players/search/ars");
@@ -408,6 +451,44 @@ describe("Tool Handlers", () => {
     expect(firstUrl.searchParams.get("include")).toBe("country");
     const coachUrl = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[3][0]);
     expect(coachUrl.pathname).toBe("/v3/football/coaches/search/ars");
+    const refUrl = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[4][0]);
+    expect(refUrl.pathname).toBe("/v3/football/referees/search/ars");
+    const venueUrl = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[5][0]);
+    expect(venueUrl.pathname).toBe("/v3/football/venues/search/ars");
+  });
+
+  it("search uses the venues endpoint when type=venue", async () => {
+    globalThis.fetch = mockFetchJson({
+      data: [{ id: 206, name: "Old Trafford", country: { name: "England" } }],
+    });
+
+    const result = await toolMap.get("search")!.handler({ query: "Old Trafford", type: "venue" });
+    const parsed = parseToolJson(result);
+
+    expect(parsed.data).toEqual([
+      { id: 206, entity_type: "venue", name: "Old Trafford", country: "England" },
+    ]);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    const calledUrl = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
+    expect(calledUrl.pathname).toBe("/v3/football/venues/search/Old%20Trafford");
+    expect(calledUrl.searchParams.get("include")).toBe("country");
+  });
+
+  it("search uses the referees endpoint when type=referee", async () => {
+    globalThis.fetch = mockFetchJson({
+      data: [{ id: 14532, name: "Anthony Taylor", country: { name: "England" } }],
+    });
+
+    const result = await toolMap.get("search")!.handler({ query: "Taylor", type: "referee" });
+    const parsed = parseToolJson(result);
+
+    expect(parsed.data).toEqual([
+      { id: 14532, entity_type: "referee", name: "Anthony Taylor", country: "England" },
+    ]);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    const calledUrl = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
+    expect(calledUrl.pathname).toBe("/v3/football/referees/search/Taylor");
+    expect(calledUrl.searchParams.get("include")).toBe("country");
   });
 
   it("search uses the coaches endpoint when type=coach", async () => {
@@ -579,6 +660,362 @@ describe("Tool Handlers", () => {
     const parsed = parseToolJson(await toolMap.get("get_coach")!.handler({ id: 999 }));
     expect(parsed.current_team).toBeNull();
     expect(parsed).toMatchObject({ id: 999, name: "Retired Gaffer", nationality: "England", date_of_birth: "1950-01-01" });
+  });
+
+  it("get_referee returns a profile (coach field set minus team), falling back to country for nationality", async () => {
+    // Real shape observed live: nationality is null on the referee record; the
+    // populated origin is in `country` (Anthony Taylor -> England).
+    globalThis.fetch = mockFetchJson({
+      data: {
+        id: 14532,
+        display_name: "Anthony Taylor",
+        date_of_birth: "1978-10-20",
+        nationality: null,
+        country: { id: 462, name: "England" },
+      },
+    });
+
+    const result = await toolMap.get("get_referee")!.handler({ id: 14532 });
+    const parsed = parseToolJson(result);
+
+    expect(parsed).toEqual({
+      id: 14532,
+      name: "Anthony Taylor",
+      nationality: "England",
+      date_of_birth: "1978-10-20",
+    });
+    expect(parsed.current_team).toBeUndefined(); // referees have no team
+
+    const calledUrl = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
+    expect(calledUrl.pathname).toBe("/v3/football/referees/14532");
+    expect(calledUrl.searchParams.get("include")).toBe("nationality;country");
+  });
+
+  it("get_venue returns the full record including address and coordinates", async () => {
+    // Real shape observed live (Old Trafford, venue 206).
+    globalThis.fetch = mockFetchJson({
+      data: {
+        id: 206,
+        name: "Old Trafford",
+        city_name: "Manchester",
+        city: { id: 1, name: "Manchester" },
+        country: { id: 462, name: "England" },
+        capacity: 74879,
+        surface: "grass",
+        address: "Sir Matt Busby Way",
+        latitude: 53.463056,
+        longitude: -2.291389,
+        image_path: "https://cdn.example/og.png",
+      },
+    });
+
+    const result = await toolMap.get("get_venue")!.handler({ id: 206 });
+    const parsed = parseToolJson(result);
+
+    expect(parsed).toEqual({
+      id: 206,
+      name: "Old Trafford",
+      city: "Manchester",
+      country: "England",
+      capacity: 74879,
+      surface: "grass",
+      address: "Sir Matt Busby Way",
+      coordinates: { latitude: 53.463056, longitude: -2.291389 },
+    });
+
+    const calledUrl = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
+    expect(calledUrl.pathname).toBe("/v3/football/venues/206");
+    expect(calledUrl.searchParams.get("include")).toBe("country;city");
+  });
+
+  it("get_venue returns coordinates null when latitude/longitude are absent", async () => {
+    globalThis.fetch = mockFetchJson({
+      data: { id: 99, name: "Backstreet Ground", city_name: "Nowhere", capacity: null, surface: null, address: null },
+    });
+    const parsed = parseToolJson(await toolMap.get("get_venue")!.handler({ id: 99 }));
+    expect(parsed).toMatchObject({ id: 99, name: "Backstreet Ground", city: "Nowhere", country: null, coordinates: null });
+  });
+
+  it("get_venue keeps a legitimate 0 coordinate (equator / prime meridian)", async () => {
+    // The guard is `!== null`, not truthiness, so lat/lng of 0 survive.
+    globalThis.fetch = mockFetchJson({
+      data: { id: 100, name: "Null Island FC", city_name: "Null Island", latitude: 0, longitude: 0 },
+    });
+    const parsed = parseToolJson(await toolMap.get("get_venue")!.handler({ id: 100 }));
+    expect(parsed.coordinates).toEqual({ latitude: 0, longitude: 0 });
+  });
+
+  it("get_venue returns coordinates null when only one of latitude/longitude is present", async () => {
+    // A half-populated pair collapses to null (the && guard, not ||).
+    globalThis.fetch = mockFetchJson({
+      data: { id: 101, name: "Half Coords Ground", city_name: "Halfton", latitude: 50.1, longitude: null },
+    });
+    const parsed = parseToolJson(await toolMap.get("get_venue")!.handler({ id: 101 }));
+    expect(parsed.coordinates).toBeNull();
+  });
+
+  it("get_venue falls back to the city include when city_name is absent", async () => {
+    globalThis.fetch = mockFetchJson({
+      data: { id: 102, name: "Inc Ground", city: { id: 3, name: "Cityton" }, country: { name: "England" } },
+    });
+    const parsed = parseToolJson(await toolMap.get("get_venue")!.handler({ id: 102 }));
+    expect(parsed.city).toBe("Cityton");
+  });
+
+  it("get_rivals resolves rival names via the rival include with team_id/returned meta", async () => {
+    // Real shape observed live: row is {team_id, rival_id, id}; the `rival`
+    // include nests the rival team (Liverpool 8 -> Man United 14).
+    globalThis.fetch = mockFetchJson({
+      data: [
+        { id: 1246, sport_id: 1, team_id: 8, rival_id: 14, rival: { id: 14, name: "Manchester United", short_code: "MUN" } },
+        { id: 1247, sport_id: 1, team_id: 8, rival_id: 11, rival: { id: 11, name: "Everton", short_code: "EVE" } },
+      ],
+    });
+
+    const result = await toolMap.get("get_rivals")!.handler({ team_id: 8 });
+    const parsed = parseToolJson(result);
+
+    expect(parsed.data).toEqual([
+      { rival_team_id: 14, rival_team_name: "Manchester United", rival_short_code: "MUN" },
+      { rival_team_id: 11, rival_team_name: "Everton", rival_short_code: "EVE" },
+    ]);
+    expect(parsed.meta).toEqual({ team_id: 8, returned: 2 });
+
+    const calledUrl = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
+    expect(calledUrl.pathname).toBe("/v3/football/rivals/teams/8");
+    expect(calledUrl.searchParams.get("include")).toBe("rival");
+  });
+
+  it("get_rivals returns an empty list (not an error) when a team has no rival data", async () => {
+    globalThis.fetch = mockFetchJson({ data: [] });
+    const parsed = parseToolJson(await toolMap.get("get_rivals")!.handler({ team_id: 100000 }));
+    expect(parsed.data).toEqual([]);
+    expect(parsed.meta).toEqual({ team_id: 100000, returned: 0 });
+  });
+
+  it("get_rivals falls back to the flat rival_id when the rival include is absent", async () => {
+    // If the `rival` include is missing (e.g. tier coverage), the id still
+    // resolves from the flat rival_id field; name/short_code fall back to null.
+    globalThis.fetch = mockFetchJson({
+      data: [
+        { id: 1246, team_id: 8, rival_id: 14 },
+        { id: 1247, team_id: 8, rival_id: 11, rival: { name: "No Id Club", short_code: "NIC" } },
+      ],
+    });
+    const parsed = parseToolJson(await toolMap.get("get_rivals")!.handler({ team_id: 8 }));
+    expect(parsed.data).toEqual([
+      { rival_team_id: 14, rival_team_name: null, rival_short_code: null },
+      { rival_team_id: 11, rival_team_name: "No Id Club", rival_short_code: "NIC" },
+    ]);
+    expect(parsed.meta).toEqual({ team_id: 8, returned: 2 });
+  });
+
+  it("get_rivals drops rows whose id cannot be resolved and counts returned post-filter", async () => {
+    globalThis.fetch = mockFetchJson({
+      data: [
+        { id: 1, team_id: 8, rival_id: 14, rival: { id: 14, name: "Manchester United", short_code: "MUN" } },
+        { id: 2, team_id: 8 },
+      ],
+    });
+    const parsed = parseToolJson(await toolMap.get("get_rivals")!.handler({ team_id: 8 }));
+    expect(parsed.data).toEqual([
+      { rival_team_id: 14, rival_team_name: "Manchester United", rival_short_code: "MUN" },
+    ]);
+    expect(parsed.meta).toEqual({ team_id: 8, returned: 1 });
+  });
+
+  it("get_rivals normalizes a missing or empty short_code to null while keeping the rival", async () => {
+    globalThis.fetch = mockFetchJson({
+      data: [
+        { id: 1, team_id: 8, rival_id: 70, rival: { id: 70, name: "Some Club" } },
+        { id: 2, team_id: 8, rival_id: 71, rival: { id: 71, name: "Blank Code FC", short_code: "" } },
+      ],
+    });
+    const parsed = parseToolJson(await toolMap.get("get_rivals")!.handler({ team_id: 8 }));
+    expect(parsed.data).toEqual([
+      { rival_team_id: 70, rival_team_name: "Some Club", rival_short_code: null },
+      { rival_team_id: 71, rival_team_name: "Blank Code FC", rival_short_code: null },
+    ]);
+    expect(parsed.meta).toEqual({ team_id: 8, returned: 2 });
+  });
+
+  it("get_rivals resolves the rival name via getPreferredName (display_name, trimmed)", async () => {
+    globalThis.fetch = mockFetchJson({
+      data: [{ id: 1, team_id: 8, rival_id: 14, rival: { id: 14, display_name: "Man Utd ", short_code: "MUN" } }],
+    });
+    const parsed = parseToolJson(await toolMap.get("get_rivals")!.handler({ team_id: 8 }));
+    expect(parsed.data).toEqual([
+      { rival_team_id: 14, rival_team_name: "Man Utd", rival_short_code: "MUN" },
+    ]);
+    expect(parsed.meta).toEqual({ team_id: 8, returned: 1 });
+  });
+
+  it("get_commentaries returns only key moments (goals + cards), sorted by order, with folded stoppage minutes", async () => {
+    // Real shape: each line has minute, extra_minute, is_goal, is_important,
+    // order. Non-important lines (kickoff, big chances) are dropped; the rest
+    // are re-sorted by order so a same-minute card-then-goal reads correctly.
+    globalThis.fetch = mockFetchJson({
+      data: [
+        { id: 1, fixture_id: 99, comment: "First Half starts.", minute: null, extra_minute: null, is_goal: false, is_important: false, order: 1 },
+        { id: 2, fixture_id: 99, comment: "Goal! at 24'", minute: 24, extra_minute: null, is_goal: true, is_important: true, order: 28 },
+        { id: 3, fixture_id: 99, comment: "Yellow card at 24'", minute: 24, extra_minute: null, is_goal: false, is_important: true, order: 27 },
+        { id: 4, fixture_id: 99, comment: "Big chance missed", minute: 30, extra_minute: null, is_goal: false, is_important: false, order: 30 },
+        { id: 5, fixture_id: 99, comment: "Yellow card in stoppage", minute: 45, extra_minute: 9, is_goal: false, is_important: true, order: 53 },
+      ],
+    });
+
+    const result = await toolMap.get("get_commentaries")!.handler({ fixture_id: 99 });
+    const parsed = parseToolJson(result);
+
+    expect(parsed.data).toEqual([
+      { minute: 24, comment: "Yellow card at 24'", is_goal: false },
+      { minute: 24, comment: "Goal! at 24'", is_goal: true },
+      { minute: "45+9", comment: "Yellow card in stoppage", is_goal: false },
+    ]);
+    expect(parsed.meta).toEqual({ fixture_id: 99, returned: 3 });
+
+    const calledUrl = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
+    expect(calledUrl.pathname).toBe("/v3/football/commentaries/fixtures/99");
+    expect(calledUrl.searchParams.get("include")).toBeNull();
+    // The by-fixture endpoint returns everything in one response and ignores
+    // page/per_page, so the tool must not send them.
+    expect(calledUrl.searchParams.get("page")).toBeNull();
+    expect(calledUrl.searchParams.get("per_page")).toBeNull();
+  });
+
+  it("get_commentaries normalizes a null minute and a missing is_goal field", async () => {
+    globalThis.fetch = mockFetchJson({
+      data: [
+        // is_goal omitted -> coerced to false; null minute -> null.
+        { id: 1, comment: "Important line with no clock", minute: null, extra_minute: null, is_important: true, order: 5 },
+        // null minute wins over extra_minute (no "null+5").
+        { id: 2, comment: "Null minute with stoppage set", minute: null, extra_minute: 5, is_goal: false, is_important: true, order: 6 },
+      ],
+    });
+
+    const parsed = parseToolJson(await toolMap.get("get_commentaries")!.handler({ fixture_id: 99 }));
+    expect(parsed.data).toEqual([
+      { minute: null, comment: "Important line with no clock", is_goal: false },
+      { minute: null, comment: "Null minute with stoppage set", is_goal: false },
+    ]);
+    expect(parsed.meta).toEqual({ fixture_id: 99, returned: 2 });
+  });
+
+  it("get_commentaries returns all key moments without a cap", async () => {
+    const lines = Array.from({ length: 30 }, (_, i) => ({
+      id: i + 1,
+      comment: `Card ${i + 1}`,
+      minute: i + 1,
+      extra_minute: null,
+      is_goal: false,
+      is_important: true,
+      order: i + 1,
+    }));
+    globalThis.fetch = mockFetchJson({ data: lines });
+
+    const parsed = parseToolJson(await toolMap.get("get_commentaries")!.handler({ fixture_id: 99 }));
+    expect(parsed.data).toHaveLength(30);
+    expect(parsed.meta).toEqual({ fixture_id: 99, returned: 30 });
+  });
+
+  it("get_commentaries returns an empty list for a known fixture with commentary but no key moments (no existence probe)", async () => {
+    const fetchMock = mockFetchJson({
+      data: [
+        { id: 1, comment: "First Half starts.", minute: null, extra_minute: null, is_goal: false, is_important: false, order: 1 },
+        { id: 2, comment: "Second Half starts.", minute: 46, extra_minute: null, is_goal: false, is_important: false, order: 60 },
+      ],
+    });
+    globalThis.fetch = fetchMock;
+
+    const parsed = parseToolJson(await toolMap.get("get_commentaries")!.handler({ fixture_id: 99 }));
+    expect(parsed.data).toEqual([]);
+    expect(parsed.meta).toEqual({ fixture_id: 99, returned: 0 });
+    // Coverage exists (lines came back), so it must NOT probe the fixture.
+    expect(fetchMock.mock.calls).toHaveLength(1);
+  });
+
+  it("get_commentaries returns an empty list (not an error) for a known fixture with no commentary at all", async () => {
+    // First call: commentary empty. Second call: assertFixtureExists confirms
+    // the fixture is real, so the tool returns empty rather than not_found.
+    const fetchMock = mockFetchJson({ data: [] }, { data: { id: 18841626 } });
+    globalThis.fetch = fetchMock;
+
+    const parsed = parseToolJson(await toolMap.get("get_commentaries")!.handler({ fixture_id: 18841626 }));
+    expect(parsed.data).toEqual([]);
+    expect(parsed.meta).toEqual({ fixture_id: 18841626, returned: 0 });
+    expect(fetchMock.mock.calls).toHaveLength(2);
+    expect(new URL(fetchMock.mock.calls[1][0]).pathname).toBe("/v3/football/fixtures/18841626");
+  });
+
+  it("get_commentaries raises not_found when the fixture itself is unknown", async () => {
+    // The commentary endpoint returns 200 + data:[] for unknown fixtures, so
+    // the existence probe is what surfaces not_found.
+    globalThis.fetch = mockFetchJson({ data: [] }, { data: [] });
+    await expect(toolMap.get("get_commentaries")!.handler({ fixture_id: 999999999 })).rejects.toThrow(
+      "Fixture 999999999 was not found",
+    );
+  });
+
+  it("get_totw sorts players by formation_position, curates the shape, and surfaces formation/round/meta", async () => {
+    // Real shape: 11 unordered rows, each repeating formation + round, with
+    // nested player/team. position_id resolves via the types cache; player_name
+    // uses the trimmed display_name; the logo/height/detailed-id noise is dropped.
+    const round = { id: 372154, sport_id: 1, league_id: 8, season_id: 25583, name: "38", finished: true, starting_at: "2026-05-24", ending_at: "2026-05-24", games_in_current_week: false };
+    globalThis.fetch = mockFetchJson({
+      data: [
+        { id: 1, player_id: 100, team_id: 8, round_id: 372154, rating: 7.39, formation_position: 4, formation: "4-3-3", player: { id: 100, position_id: 25, display_name: "Virgil van Dijk ", name: "Virgil van Dijk", image_path: "x", height: 195 }, team: { id: 8, name: "Liverpool", short_code: "LIV", image_path: "y" }, round },
+        { id: 2, player_id: 200, team_id: 9, round_id: 372154, rating: "8.84", formation_position: 10, formation: "4-3-3", player: { id: 200, position_id: 27, display_name: "Ollie Watkins" }, team: { id: 9, name: "Aston Villa", short_code: "AVL" }, round },
+        { id: 3, player_id: 300, team_id: 10, round_id: 372154, rating: 8.02, formation_position: 1, formation: "4-3-3", player: { id: 300, position_id: 24, display_name: "Caoimhín Kelleher" }, team: { id: 10, name: "Brentford", short_code: "BRE" }, round },
+        { id: 4, player_id: 400, team_id: 14, round_id: 372154, rating: 8.63, formation_position: 6, formation: "4-3-3", player: { id: 400, position_id: 26, display_name: "Bruno Fernandes" }, team: { id: 14, name: "Manchester United", short_code: "MUN" }, round },
+      ],
+    });
+
+    const parsed = parseToolJson(await toolMap.get("get_totw")!.handler({ league_id: 8 }));
+
+    expect(parsed.league_id).toBe(8);
+    expect(parsed.formation).toBe("4-3-3");
+    expect(parsed.round).toEqual({ id: 372154, name: "38", starting_at: "2026-05-24", ending_at: "2026-05-24", finished: true });
+    expect(parsed.meta).toEqual({ returned: 4, scope: "latest", league_id: 8, round_id: 372154 });
+    // Sorted by formation_position (goalkeeper first); rating coerced from string; name trimmed;
+    // all four role labels (24/25/26/27 -> Goalkeeper/Defender/Midfielder/Attacker) resolved.
+    expect(parsed.players).toEqual([
+      { formation_position: 1, position: "Goalkeeper", player_id: 300, player_name: "Caoimhín Kelleher", team_id: 10, team_name: "Brentford", team_short_code: "BRE", rating: 8.02 },
+      { formation_position: 4, position: "Defender", player_id: 100, player_name: "Virgil van Dijk", team_id: 8, team_name: "Liverpool", team_short_code: "LIV", rating: 7.39 },
+      { formation_position: 6, position: "Midfielder", player_id: 400, player_name: "Bruno Fernandes", team_id: 14, team_name: "Manchester United", team_short_code: "MUN", rating: 8.63 },
+      { formation_position: 10, position: "Attacker", player_id: 200, player_name: "Ollie Watkins", team_id: 9, team_name: "Aston Villa", team_short_code: "AVL", rating: 8.84 },
+    ]);
+
+    const url = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
+    expect(url.pathname).toBe("/v3/football/team-of-the-week/leagues/8/latest");
+    expect(url.searchParams.get("include")).toBe("player;team;round");
+  });
+
+  it("get_totw returns a clear empty result (not an error) for a league with no TOTW", async () => {
+    globalThis.fetch = mockFetchJson({ data: [] });
+    const parsed = parseToolJson(await toolMap.get("get_totw")!.handler({ league_id: 1659 }));
+    expect(parsed).toEqual({
+      league_id: 1659,
+      round: null,
+      formation: null,
+      players: [],
+      meta: { returned: 0, scope: "latest", league_id: 1659, round_id: null },
+    });
+  });
+
+  it("get_totw falls back to the row's player_id/team_id when the player/team include is absent", async () => {
+    // Defensive: if the nested includes fail to populate, ids still resolve from
+    // the flat pivot fields while name/short_code/position degrade to null.
+    const round = { id: 372154, name: "38", finished: true, starting_at: "2026-05-24", ending_at: "2026-05-24" };
+    globalThis.fetch = mockFetchJson({
+      data: [
+        { id: 1, player_id: 555, team_id: 8, round_id: 372154, rating: 7.0, formation_position: 7, formation: "4-3-3", round },
+      ],
+    });
+    const parsed = parseToolJson(await toolMap.get("get_totw")!.handler({ league_id: 8 }));
+    expect(parsed.players).toEqual([
+      { formation_position: 7, position: null, player_id: 555, player_name: null, team_id: 8, team_name: null, team_short_code: null, rating: 7.0 },
+    ]);
+    expect(parsed.meta).toEqual({ returned: 1, scope: "latest", league_id: 8, round_id: 372154 });
   });
 
   it("get_league uses the exact league endpoint and output shape", async () => {
@@ -1080,6 +1517,8 @@ describe("Tool Handlers", () => {
       {
         position: 1,
         team: { id: 53, name: "Celtic" },
+        group: null,
+        round: null,
         played: 32,
         won: 26,
         drawn: 2,
@@ -1094,8 +1533,36 @@ describe("Tool Handlers", () => {
     const standingsUrl = new URL(fetchMock.mock.calls[1][0]);
 
     expect(standingsUrl.pathname).toBe("/v3/football/standings/live/leagues/501");
-    expect(standingsUrl.searchParams.get("include")).toBe("participant;details");
+    expect(standingsUrl.searchParams.get("include")).toBe("participant;details;group;round");
     expect(Number(standingsUrl.searchParams.get("per_page"))).toBeGreaterThanOrEqual(36);
+  });
+
+  it("get_standings surfaces group and round and orders group-stage rows by group then position", async () => {
+    globalThis.fetch = mockFetchJson(
+      // 1. league existence check
+      { data: { id: 732, name: "World Cup" } },
+      // 2. live standings — returned interleaved with per-group positions
+      {
+        data: [
+          { position: 2, group_id: 1, group: { id: 1, name: "Group B" }, round_id: 9, round: { id: 9, name: "3" }, participant: { id: 20, name: "Brazil" }, details: [{ type_id: 187, value: 4 }] },
+          { position: 1, group_id: 2, group: { id: 2, name: "Group A" }, round_id: 9, round: { id: 9, name: "3" }, participant: { id: 10, name: "France" }, details: [{ type_id: 187, value: 9 }] },
+          { position: 1, group_id: 1, group: { id: 1, name: "Group B" }, round_id: 9, round: { id: 9, name: "3" }, participant: { id: 21, name: "Spain" }, details: [{ type_id: 187, value: 7 }] },
+        ],
+      },
+    );
+
+    const parsed = parseToolJson(await toolMap.get("get_standings")!.handler({ id: 732 }));
+    // Ordered Group A then Group B, position within each.
+    expect(parsed.data.map((r: { team: { name: string }; group: { name: string }; position: number }) => [r.group.name, r.position, r.team.name])).toEqual([
+      ["Group A", 1, "France"],
+      ["Group B", 1, "Spain"],
+      ["Group B", 2, "Brazil"],
+    ]);
+    expect(parsed.data[0]).toMatchObject({ group: { id: 2, name: "Group A" }, round: { id: 9, name: "3" }, points: 9 });
+
+    const url = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[1][0]);
+    expect(url.pathname).toBe("/v3/football/standings/live/leagues/732");
+    expect(url.searchParams.get("include")).toBe("participant;details;group;round");
   });
 
   it("get_standings falls back to season standings when live returns 404", async () => {
@@ -1145,6 +1612,8 @@ describe("Tool Handlers", () => {
       {
         position: 1,
         team: { id: 53, name: "Celtic" },
+        group: null,
+        round: null,
         played: 32,
         won: 26,
         drawn: 2,
@@ -1386,6 +1855,182 @@ describe("Tool Handlers", () => {
     globalThis.fetch = mockFetchJson({ data: { id: 19609174, state_id: 1, participants: [{ id: 100, name: "A", meta: { location: "home" } }, { id: 101, name: "B", meta: { location: "away" } }], xgfixture: [] } });
     const parsed = parseToolJson(await toolMap.get("get_fixture_details")!.handler({ fixture_id: 19609174, includes: ["xg"] }));
     expect(parsed.xg).toEqual([]);
+  });
+
+  it("get_fixture_details maps the referees include to named match officials with resolved roles", async () => {
+    // Real shape observed live: assignment rows {referee_id, type_id, referee:{...}};
+    // type_id resolves via the startup types cache (6 Referee, 7 1st Assistant, ...).
+    globalThis.fetch = mockFetchJson({
+      data: {
+        id: 19683238, state_id: 5,
+        participants: [
+          { id: 503, name: "FC Bayern München", meta: { location: "home" } },
+          { id: 591, name: "Paris Saint Germain", meta: { location: "away" } },
+        ],
+        referees: [
+          { id: 1, fixture_id: 19683238, type_id: 6, referee_id: 14425, referee: { id: 14425, name: "João Pinheiro" } },
+          { id: 2, fixture_id: 19683238, type_id: 7, referee_id: 13597, referee: { id: 13597, name: "Bruno Jesus" } },
+          { id: 3, fixture_id: 19683238, type_id: 9, referee_id: 15852, referee: { id: 15852, name: "Espen Eskås" } },
+        ],
+      },
+    });
+
+    const parsed = parseToolJson(await toolMap.get("get_fixture_details")!.handler({ fixture_id: 19683238, includes: ["referees"] }));
+    expect(parsed.referees).toEqual([
+      { referee_id: 14425, name: "João Pinheiro", type: "Referee" },
+      { referee_id: 13597, name: "Bruno Jesus", type: "1st Assistant" },
+      { referee_id: 15852, name: "Espen Eskås", type: "4th Official" },
+    ]);
+
+    const url = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
+    expect(url.searchParams.get("include")).toBe("participants;scores;league;state;referees.referee");
+  });
+
+  it("get_fixture_details dedupes tv_stations across regions and curates to { name, url } sorted by name", async () => {
+    // Real shape: tvStations comes back as pivot rows (one per station PER
+    // broadcast country), so a station repeats across country_ids. We dedupe by
+    // station id, drop the logo image_path, and sort by name. url may be null.
+    globalThis.fetch = mockFetchJson({
+      data: {
+        id: 18841626, state_id: 5,
+        participants: [
+          { id: 8, name: "Aston Villa", meta: { location: "home" } },
+          { id: 11, name: "Everton", meta: { location: "away" } },
+        ],
+        tvstations: [
+          { id: 1, fixture_id: 18841626, tvstation_id: 33, country_id: 5, tvstation: { id: 33, name: "Star+", url: "https://www.starplus.com/", image_path: "https://cdn/33.png", type: "tv" } },
+          { id: 2, fixture_id: 18841626, tvstation_id: 33, country_id: 44, tvstation: { id: 33, name: "Star+", url: "https://www.starplus.com/", image_path: "https://cdn/33.png", type: "tv" } },
+          { id: 3, fixture_id: 18841626, tvstation_id: 41, country_id: 9, tvstation: { id: 41, name: "DAZN", url: "https://www.dazn.com", image_path: "https://cdn/41.png", type: "tv" } },
+          { id: 4, fixture_id: 18841626, tvstation_id: 70, country_id: 5, tvstation: { id: 70, name: "Local TV", image_path: "https://cdn/70.png", type: "tv" } },
+        ],
+      },
+    });
+
+    const parsed = parseToolJson(await toolMap.get("get_fixture_details")!.handler({ fixture_id: 18841626, includes: ["tv_stations"] }));
+    expect(parsed.tv_stations).toEqual([
+      { name: "DAZN", url: "https://www.dazn.com" },
+      { name: "Local TV", url: null },
+      { name: "Star+", url: "https://www.starplus.com/" },
+    ]);
+
+    const url = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
+    expect(url.searchParams.get("include")).toBe("participants;scores;league;state;tvStations.tvStation");
+  });
+
+  it("get_fixture_details returns an empty tv_stations array when no broadcasters are listed", async () => {
+    globalThis.fetch = mockFetchJson({
+      data: {
+        id: 18841626, state_id: 5,
+        participants: [
+          { id: 8, name: "Aston Villa", meta: { location: "home" } },
+          { id: 11, name: "Everton", meta: { location: "away" } },
+        ],
+        tvstations: [],
+      },
+    });
+    const parsed = parseToolJson(await toolMap.get("get_fixture_details")!.handler({ fixture_id: 18841626, includes: ["tv_stations"] }));
+    expect(parsed.tv_stations).toEqual([]);
+  });
+
+  it("get_fixture_details omits tv_stations entirely when the include is not requested", async () => {
+    globalThis.fetch = mockFetchJson({
+      data: {
+        id: 18841626, state_id: 5,
+        participants: [
+          { id: 8, name: "Aston Villa", meta: { location: "home" } },
+          { id: 11, name: "Everton", meta: { location: "away" } },
+        ],
+        tvstations: [
+          { id: 1, tvstation_id: 33, country_id: 5, tvstation: { id: 33, name: "Star+", url: "https://www.starplus.com/" } },
+        ],
+      },
+    });
+    const parsed = parseToolJson(await toolMap.get("get_fixture_details")!.handler({ fixture_id: 18841626, includes: ["events"] }));
+    expect("tv_stations" in parsed).toBe(false);
+
+    const url = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
+    expect(url.searchParams.get("include")).not.toContain("tvStations");
+  });
+
+  it("get_fixture_details dedupes tv_stations by tvstation_id even when the nested station is absent", async () => {
+    // Defensive: if the nested tvStation fails to expand, dedupe on the pivot's
+    // tvstation_id so duplicate-country rows still collapse to one entry.
+    globalThis.fetch = mockFetchJson({
+      data: {
+        id: 18841626, state_id: 5,
+        participants: [
+          { id: 8, name: "Aston Villa", meta: { location: "home" } },
+          { id: 11, name: "Everton", meta: { location: "away" } },
+        ],
+        tvstations: [
+          { id: 1, tvstation_id: 33, country_id: 5 },
+          { id: 2, tvstation_id: 33, country_id: 44 },
+        ],
+      },
+    });
+    const parsed = parseToolJson(await toolMap.get("get_fixture_details")!.handler({ fixture_id: 18841626, includes: ["tv_stations"] }));
+    expect(parsed.tv_stations).toEqual([{ name: null, url: null }]);
+  });
+
+  it("get_fixture_details upgrades a nameless tv_stations placeholder when a later row resolves the station", async () => {
+    // Pivot rows for one station can arrive with the nested station unexpanded
+    // first; a named row for the same station must win regardless of order.
+    globalThis.fetch = mockFetchJson({
+      data: {
+        id: 18841626, state_id: 5,
+        participants: [
+          { id: 8, name: "Aston Villa", meta: { location: "home" } },
+          { id: 11, name: "Everton", meta: { location: "away" } },
+        ],
+        tvstations: [
+          { id: 1, tvstation_id: 33, country_id: 5 },
+          { id: 2, tvstation_id: 33, country_id: 44, tvstation: { id: 33, name: "Star+", url: "https://www.starplus.com/" } },
+        ],
+      },
+    });
+    const parsed = parseToolJson(await toolMap.get("get_fixture_details")!.handler({ fixture_id: 18841626, includes: ["tv_stations"] }));
+    expect(parsed.tv_stations).toEqual([{ name: "Star+", url: "https://www.starplus.com/" }]);
+  });
+
+  it("get_fixture_details sorts a nameless tv_station ahead of named ones without throwing", async () => {
+    globalThis.fetch = mockFetchJson({
+      data: {
+        id: 18841626, state_id: 5,
+        participants: [
+          { id: 8, name: "Aston Villa", meta: { location: "home" } },
+          { id: 11, name: "Everton", meta: { location: "away" } },
+        ],
+        tvstations: [
+          { id: 1, tvstation_id: 41, country_id: 9, tvstation: { id: 41, name: "Sky Sports", url: null } },
+          { id: 2, tvstation_id: 70, country_id: 5 },
+          { id: 3, tvstation_id: 33, country_id: 5, tvstation: { id: 33, name: "DAZN", url: "https://www.dazn.com" } },
+        ],
+      },
+    });
+    const parsed = parseToolJson(await toolMap.get("get_fixture_details")!.handler({ fixture_id: 18841626, includes: ["tv_stations"] }));
+    expect(parsed.tv_stations).toEqual([
+      { name: null, url: null },
+      { name: "DAZN", url: "https://www.dazn.com" },
+      { name: "Sky Sports", url: null },
+    ]);
+  });
+
+  it("get_fixture_details drops a tv_stations row with no station id and keeps a station with id 0", async () => {
+    globalThis.fetch = mockFetchJson({
+      data: {
+        id: 18841626, state_id: 5,
+        participants: [
+          { id: 8, name: "Aston Villa", meta: { location: "home" } },
+          { id: 11, name: "Everton", meta: { location: "away" } },
+        ],
+        tvstations: [
+          { id: 1, country_id: 5 }, // no tvstation_id and no nested station -> dropped
+          { id: 2, tvstation_id: 0, country_id: 5, tvstation: { id: 0, name: "Zero TV", url: null } }, // id 0 is valid
+        ],
+      },
+    });
+    const parsed = parseToolJson(await toolMap.get("get_fixture_details")!.handler({ fixture_id: 18841626, includes: ["tv_stations"] }));
+    expect(parsed.tv_stations).toEqual([{ name: "Zero TV", url: null }]);
   });
 
   // ── get_season_stats ───────────────────────────────────────────────────────
@@ -1665,6 +2310,281 @@ describe("Tool Handlers", () => {
       howToFix: expect.stringContaining("type='confirmed'"),
     });
   });
+
+  // ── get_fixture_news ─────────────────────────────────────────────────────
+  // Real shapes observed live on 2026-06-12 (Bayern v PSG 19683238): articles
+  // {id, fixture_id, league_id, title, type}, lines {id, newsitem_id, text, type}
+  // returned out of order — id-ascending sort reconstructs narrative order.
+  const newsFixture = (over: Record<string, unknown> = {}) => ({
+    data: {
+      id: 19683238,
+      prematchnews: [
+        {
+          id: 12571, fixture_id: 19683238, league_id: 2, title: "Bayern eager to overturn deficit", type: "prematch",
+          lines: [
+            { id: 59819, newsitem_id: 12571, text: "However, Paris arrive with momentum.", type: "away" },
+            { id: 59817, newsitem_id: 12571, text: "After a breathtaking first leg.", type: "introduction" },
+            { id: 59818, newsitem_id: 12571, text: "The 5-4 scoreline set up a showdown.", type: "home" },
+          ],
+        },
+      ],
+      postmatchnews: [
+        {
+          id: 12577, fixture_id: 19683238, league_id: 2, title: "PSG secure draw", type: "postmatch",
+          lines: [
+            { id: 59837, newsitem_id: 12577, text: "The equaliser came in stoppage time.", type: "line" },
+            { id: 59835, newsitem_id: 12577, text: "A spirited PSG battled to a draw.", type: "line" },
+            { id: 59836, newsitem_id: 12577, text: "PSG stunned Bayern early.", type: "line" },
+          ],
+        },
+      ],
+      ...over,
+    },
+  });
+
+  it("get_fixture_news defaults to prematch and joins lines into an id-ordered body", async () => {
+    globalThis.fetch = mockFetchJson(newsFixture());
+    const result = await toolMap.get("get_fixture_news")!.handler({ fixture_id: 19683238 });
+    const parsed = parseToolJson(result);
+
+    // Only prematch requested.
+    expect(Object.keys(parsed.data)).toEqual(["prematch"]);
+    expect(parsed.data.prematch).toEqual([
+      {
+        id: 12571,
+        title: "Bayern eager to overturn deficit",
+        type: "prematch",
+        league_id: 2,
+        // lines sorted 59817, 59818, 59819 (introduction, home, away) → ordered prose, no per-line ids/types.
+        body: "After a breathtaking first leg.\n\nThe 5-4 scoreline set up a showdown.\n\nHowever, Paris arrive with momentum.",
+      },
+    ]);
+    expect(parsed.meta).toEqual({ timing: "prematch", returned: { prematch: 1 } });
+
+    const url = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
+    expect(url.pathname).toBe("/v3/football/fixtures/19683238");
+    expect(url.searchParams.get("include")).toBe("prematchnews.lines");
+  });
+
+  it("get_fixture_news postmatch reads in narrative order (sorted by id, not return order)", async () => {
+    globalThis.fetch = mockFetchJson(newsFixture());
+    const parsed = parseToolJson(await toolMap.get("get_fixture_news")!.handler({ fixture_id: 19683238, timing: "postmatch" }));
+    expect(Object.keys(parsed.data)).toEqual(["postmatch"]);
+    // Returned shuffled (59837,59835,59836) → sorted 59835,59836,59837.
+    expect(parsed.data.postmatch[0].body).toBe(
+      "A spirited PSG battled to a draw.\n\nPSG stunned Bayern early.\n\nThe equaliser came in stoppage time.",
+    );
+    expect(parsed.data.postmatch[0].body).not.toMatch(/newsitem_id|"type"/);
+    expect(parsed.meta).toEqual({ timing: "postmatch", returned: { postmatch: 1 } });
+    const url = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
+    expect(url.searchParams.get("include")).toBe("postmatchnews.lines");
+  });
+
+  it("get_fixture_news timing=both returns both arrays and counts", async () => {
+    globalThis.fetch = mockFetchJson(newsFixture());
+    const parsed = parseToolJson(await toolMap.get("get_fixture_news")!.handler({ fixture_id: 19683238, timing: "both" }));
+    expect(Object.keys(parsed.data).sort()).toEqual(["postmatch", "prematch"]);
+    expect(parsed.meta).toEqual({ timing: "both", returned: { prematch: 1, postmatch: 1 } });
+    const url = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
+    expect(url.searchParams.get("include")).toBe("prematchnews.lines;postmatchnews.lines");
+  });
+
+  it("get_fixture_news returns empty arrays and zero counts for a fixture with no news", async () => {
+    globalThis.fetch = mockFetchJson({ data: { id: 19714265, prematchnews: [], postmatchnews: [] } });
+    const parsed = parseToolJson(await toolMap.get("get_fixture_news")!.handler({ fixture_id: 19714265, timing: "both" }));
+    expect(parsed.data).toEqual({ prematch: [], postmatch: [] });
+    expect(parsed.meta).toEqual({ timing: "both", returned: { prematch: 0, postmatch: 0 } });
+  });
+
+  it("get_fixture_news reports not_found for an unknown fixture across upstream shapes", async () => {
+    // (a) data: null
+    globalThis.fetch = mockFetchJson({ data: null });
+    await expect(
+      toolMap.get("get_fixture_news")!.handler({ fixture_id: 999999999 }),
+    ).rejects.toMatchObject({
+      kind: "not_found",
+      message: expect.stringContaining("Fixture 999999999"),
+      howToFix: expect.stringContaining("get_matches"),
+    });
+
+    // (b) 200 with a placeholder object lacking a numeric id (a known Sportmonks shape)
+    globalThis.fetch = mockFetchJson({ data: { fixture_id: 888888888 } });
+    await expect(
+      toolMap.get("get_fixture_news")!.handler({ fixture_id: 888888888 }),
+    ).rejects.toMatchObject({
+      kind: "not_found",
+      message: expect.stringContaining("Fixture 888888888"),
+      howToFix: expect.stringContaining("get_matches"),
+    });
+  });
+
+  // ── get_match_facts ──────────────────────────────────────────────────────
+  // Real shapes observed live on 2026-06-12 (Bayern v PSG 19683238): facts are
+  // {id, sport_id, fixture_id, type_id, participant, basis, data, natural_language,
+  // category, scope}. Fixed filters keep only scope=league_matches with non-null
+  // natural_language. One mocked page per call (pagination.has_more controls the loop).
+  // The harness forwards `nextResponse.data` as the whole payload, so nest the
+  // real {data, pagination} envelope there — that's what fetchAllPages reads to
+  // walk pages (pagination.has_more) and collect items (payload.data).
+  const matchFactsPage = (facts: Array<Record<string, unknown>>, hasMore = false) => ({
+    data: { data: facts, pagination: { has_more: hasMore } },
+  });
+  const fact = (over: Record<string, unknown>) => ({
+    id: 1, sport_id: 1, fixture_id: 19683238, type_id: 76088, participant: "both",
+    basis: "h2h", scope: "league_matches", category: "statistics",
+    natural_language: "A sentence.", data: { count: 12 }, ...over,
+  });
+
+  it("get_match_facts (basis=h2h) returns only league_matches + non-null-nl h2h facts, mapped", async () => {
+    globalThis.fetch = mockFetchJson(
+      matchFactsPage([
+        fact({ type_id: 1, basis: "h2h", scope: "league_matches", natural_language: "PSG have 3 wins.", data: { all: { count: 3 } }, participant: "away" }),
+        fact({ type_id: 2, basis: "h2h", scope: "all_matches", natural_language: "Dropped: wrong scope." }),
+        fact({ type_id: 3, basis: "h2h", scope: "league_matches", natural_language: null }),
+        fact({ type_id: 4, basis: "team", scope: "league_matches", natural_language: "Dropped: wrong basis." }),
+      ]),
+    );
+
+    const result = await toolMap.get("get_match_facts")!.handler({ fixture_id: 19683238, basis: "h2h" });
+    const parsed = parseToolJson(result);
+
+    expect(parsed.data).toEqual([
+      { type_id: 1, category: "statistics", participant: "away", natural_language: "PSG have 3 wins.", data: { all: { count: 3 } } },
+    ]);
+    expect(parsed.meta).toEqual({ returned: 1, cap: 100, possibly_more: false, basis: "h2h", category: null });
+
+    const url = new URL((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0]);
+    expect(url.pathname).toBe("/v3/football/match-facts/19683238");
+  });
+
+  it("get_match_facts (basis=team) scopes to team form and supports statistic_comparisons", async () => {
+    globalThis.fetch = mockFetchJson(
+      matchFactsPage([
+        fact({ type_id: 10, basis: "team", scope: "league_matches", category: "statistic_comparisons", natural_language: "City average more shots." }),
+        fact({ type_id: 11, basis: "team", scope: "league_matches", category: "streaks", natural_language: "Unbeaten in 5." }),
+        fact({ type_id: 12, basis: "h2h", scope: "league_matches", natural_language: "Dropped: h2h." }),
+      ]),
+    );
+    const parsed = parseToolJson(await toolMap.get("get_match_facts")!.handler({ fixture_id: 19683238, basis: "team" }));
+    expect(parsed.data.map((f: { type_id: number }) => f.type_id)).toEqual([10, 11]);
+    expect(parsed.meta).toMatchObject({ basis: "team", category: null });
+  });
+
+  it("get_match_facts applies a category filter and echoes it in meta", async () => {
+    globalThis.fetch = mockFetchJson(
+      matchFactsPage([
+        fact({ type_id: 20, basis: "team", scope: "league_matches", category: "streaks", natural_language: "Unbeaten." }),
+        fact({ type_id: 21, basis: "team", scope: "league_matches", category: "statistics", natural_language: "Scored 10." }),
+      ]),
+    );
+    const parsed = parseToolJson(await toolMap.get("get_match_facts")!.handler({ fixture_id: 19683238, basis: "team", category: ["streaks"] }));
+    expect(parsed.data.map((f: { category: string }) => f.category)).toEqual(["streaks"]);
+    expect(parsed.meta.category).toEqual(["streaks"]);
+  });
+
+  it("get_match_facts multi-category filter keeps facts in ANY requested category and dedups the echo", async () => {
+    globalThis.fetch = mockFetchJson(
+      matchFactsPage([
+        fact({ type_id: 30, basis: "team", scope: "league_matches", category: "streaks", natural_language: "Unbeaten." }),
+        fact({ type_id: 31, basis: "team", scope: "league_matches", category: "players", natural_language: "Top scorer in form." }),
+        fact({ type_id: 32, basis: "team", scope: "league_matches", category: "statistics", natural_language: "Dropped: not requested." }),
+      ]),
+    );
+    const parsed = parseToolJson(
+      // duplicate "streaks" exercises requireEnumArray's dedup in the echoed meta.
+      await toolMap.get("get_match_facts")!.handler({ fixture_id: 19683238, basis: "team", category: ["streaks", "players", "streaks"] }),
+    );
+    expect(parsed.data.map((f: { type_id: number }) => f.type_id).sort()).toEqual([30, 31]);
+    expect(parsed.meta.category).toEqual(["streaks", "players"]);
+  });
+
+  it("get_match_facts returns an empty envelope for a real fixture with no Match Facts coverage", async () => {
+    // raw facts empty, but the fixture exists → empty list, NOT not_found.
+    globalThis.fetch = mockFetchJson(matchFactsPage([]), { data: { id: 19714265, name: "Some Fixture" } });
+    const parsed = parseToolJson(await toolMap.get("get_match_facts")!.handler({ fixture_id: 19714265, basis: "team" }));
+    expect(parsed.data).toEqual([]);
+    expect(parsed.meta).toMatchObject({ returned: 0, possibly_more: false, basis: "team" });
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2); // facts page + existence check
+  });
+
+  it("get_match_facts rejects statistic_comparisons with basis=h2h before any fetch", async () => {
+    // No responses mocked: if the handler fetched, it would throw a different error.
+    globalThis.fetch = mockFetchJson();
+    await expect(
+      toolMap.get("get_match_facts")!.handler({ fixture_id: 19683238, basis: "h2h", category: ["statistic_comparisons"] }),
+    ).rejects.toMatchObject({
+      kind: "validation_error",
+      message: expect.stringContaining("only available for basis='team'"),
+    });
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it("get_match_facts walks all pages and caps at 100 with possibly_more", async () => {
+    const page = (start: number) =>
+      Array.from({ length: 60 }, (_, i) => fact({ type_id: start + i, basis: "team", scope: "league_matches", category: "statistics", natural_language: `f${start + i}` }));
+    globalThis.fetch = mockFetchJson(matchFactsPage(page(0), true), matchFactsPage(page(60), false));
+    const parsed = parseToolJson(await toolMap.get("get_match_facts")!.handler({ fixture_id: 19683238, basis: "team" }));
+    expect(parsed.data).toHaveLength(100);
+    expect(parsed.meta).toMatchObject({ returned: 100, cap: 100, possibly_more: true });
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2); // two pages walked
+  });
+
+  it("get_match_facts follows next_cursor and sends a cursor-only second request (no per_page/page)", async () => {
+    // When the API offers a next_cursor, fetchAllPages walks via cursor. The
+    // cursor request must NOT carry per_page/page — Sportmonks 400s otherwise.
+    const facts = (start: number, n: number) =>
+      Array.from({ length: n }, (_, i) => fact({ type_id: start + i, basis: "team", scope: "league_matches", category: "statistics", natural_language: `f${start + i}` }));
+    const cursorPage = (data: Array<Record<string, unknown>>, hasMore: boolean, nextCursor: string | null) => ({
+      data: { data, pagination: { has_more: hasMore, next_cursor: nextCursor } },
+    });
+    globalThis.fetch = mockFetchJson(
+      cursorPage(facts(0, 3), true, "https://api.sportmonks.com/v3/football/match-facts/19683238?cursor=TOKEN123"),
+      cursorPage(facts(3, 2), false, null),
+    );
+
+    const parsed = parseToolJson(await toolMap.get("get_match_facts")!.handler({ fixture_id: 19683238, basis: "team" }));
+    expect(parsed.data).toHaveLength(5);
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+
+    const calls = (globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls;
+    const first = new URL(calls[0][0]);
+    const second = new URL(calls[1][0]);
+    // First request is offset-style (sets per_page, obtains the cursor).
+    expect(first.searchParams.get("page")).toBe("1");
+    expect(first.searchParams.get("per_page")).toBe("50");
+    expect(first.searchParams.get("cursor")).toBeNull();
+    // Second request is cursor-only (token extracted from the next_cursor URL).
+    expect(second.searchParams.get("cursor")).toBe("TOKEN123");
+    expect(second.searchParams.get("per_page")).toBeNull();
+    expect(second.searchParams.get("page")).toBeNull();
+  });
+
+  it("get_match_facts returns an empty envelope when a real fixture has facts but none survive the filters", async () => {
+    globalThis.fetch = mockFetchJson(
+      matchFactsPage([fact({ basis: "h2h", scope: "all_matches", natural_language: "all-scope only" })]),
+    );
+    const parsed = parseToolJson(await toolMap.get("get_match_facts")!.handler({ fixture_id: 19683238, basis: "h2h" }));
+    expect(parsed.data).toEqual([]);
+    expect(parsed.meta).toMatchObject({ returned: 0, possibly_more: false, basis: "h2h" });
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1); // raw non-empty → no existence check
+  });
+
+  it("get_match_facts reports not_found when the fixture has no facts and does not exist", async () => {
+    globalThis.fetch = mockFetchJson(matchFactsPage([]), { data: [] });
+    await expect(
+      toolMap.get("get_match_facts")!.handler({ fixture_id: 999999999, basis: "h2h" }),
+    ).rejects.toMatchObject({ kind: "not_found", message: expect.stringContaining("Fixture 999999999") });
+  });
+
+  it("get_match_facts surfaces a Match Facts add-on error on 403", async () => {
+    globalThis.fetch = mockFetchJson({ status: 403, data: { message: "no access", code: 5007 } });
+    await expect(
+      toolMap.get("get_match_facts")!.handler({ fixture_id: 19683238, basis: "h2h" }),
+    ).rejects.toMatchObject({
+      kind: "authentication_error",
+      message: expect.stringContaining("Match Facts add-on"),
+    });
+  });
 });
 
 describe("Validation", () => {
@@ -1698,9 +2618,84 @@ describe("Validation", () => {
     );
   });
 
+  it("rejects missing/invalid get_fixture_news fields", async () => {
+    await expect(toolMap.get("get_fixture_news")!.handler({})).rejects.toThrow("The 'fixture_id' field must be a positive integer");
+    await expect(toolMap.get("get_fixture_news")!.handler({ fixture_id: 1, timing: "live" })).rejects.toThrow("Invalid 'timing' value");
+  });
+
+  it("rejects missing/invalid get_match_facts fields", async () => {
+    await expect(toolMap.get("get_match_facts")!.handler({ basis: "h2h" })).rejects.toThrow("The 'fixture_id' field must be a positive integer");
+    await expect(toolMap.get("get_match_facts")!.handler({ fixture_id: 1 })).rejects.toThrow("The 'basis' field must be one of: h2h, team");
+    await expect(toolMap.get("get_match_facts")!.handler({ fixture_id: 1, basis: "global" })).rejects.toThrow("Invalid 'basis' value");
+    await expect(toolMap.get("get_match_facts")!.handler({ fixture_id: 1, basis: "team", category: ["bogus"] })).rejects.toThrow("Invalid 'category' value");
+  });
+
   it("rejects missing or invalid get_coach ids", async () => {
     await expect(toolMap.get("get_coach")!.handler({})).rejects.toThrow("The 'id' field must be a positive integer");
     await expect(toolMap.get("get_coach")!.handler({ id: 0 })).rejects.toThrow("The 'id' field must be a positive integer");
+  });
+
+  it("rejects missing or invalid get_referee ids", async () => {
+    await expect(toolMap.get("get_referee")!.handler({})).rejects.toThrow("The 'id' field must be a positive integer");
+    await expect(toolMap.get("get_referee")!.handler({ id: -1 })).rejects.toThrow("The 'id' field must be a positive integer");
+  });
+
+  it("rejects missing or invalid get_venue ids", async () => {
+    await expect(toolMap.get("get_venue")!.handler({})).rejects.toThrow("The 'id' field must be a positive integer");
+    await expect(toolMap.get("get_venue")!.handler({ id: 0 })).rejects.toThrow("The 'id' field must be a positive integer");
+  });
+
+  it("rejects missing or invalid get_rivals team ids", async () => {
+    await expect(toolMap.get("get_rivals")!.handler({})).rejects.toThrow("The 'team_id' field must be a positive integer");
+    await expect(toolMap.get("get_rivals")!.handler({ team_id: 0 })).rejects.toThrow("The 'team_id' field must be a positive integer");
+  });
+
+  it("rejects missing or invalid get_commentaries fixture ids", async () => {
+    await expect(toolMap.get("get_commentaries")!.handler({})).rejects.toThrow("The 'fixture_id' field must be a positive integer");
+    await expect(toolMap.get("get_commentaries")!.handler({ fixture_id: -3 })).rejects.toThrow("The 'fixture_id' field must be a positive integer");
+  });
+
+  it("rejects missing or invalid get_totw league ids", async () => {
+    await expect(toolMap.get("get_totw")!.handler({})).rejects.toThrow("The 'league_id' field must be a positive integer");
+    await expect(toolMap.get("get_totw")!.handler({ league_id: 0 })).rejects.toThrow("The 'league_id' field must be a positive integer");
+  });
+
+  it("returns not_found (not an all-null placeholder) for unknown entity ids across all six lookups", async () => {
+    // Sportmonks returns HTTP 200 with an id-less placeholder record for an
+    // unknown id (not an empty data array), so the length>0 check alone would
+    // hand back an all-null success. Each top-level entity lookup must surface
+    // not_found instead. The nested current-team lookup is unaffected.
+    const placeholder = { data: { id: null, name: null } };
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ["get_player", { id: 999999999 }],
+      ["get_team", { id: 999999999 }],
+      ["get_league", { id: 999999999 }],
+      ["get_coach", { id: 999999999 }],
+      ["get_referee", { id: 999999999 }],
+      ["get_venue", { id: 999999999 }],
+    ];
+    for (const [tool, args] of cases) {
+      globalThis.fetch = mockFetchJson(placeholder);
+      await expect(toolMap.get(tool)!.handler(args)).rejects.toMatchObject({ kind: "not_found" });
+    }
+  });
+
+  it("get_fixture_details and get_match_preview return not_found for an id-less fixture placeholder", async () => {
+    // Same Sportmonks 200-placeholder shape as the entity lookups: a bad fixture
+    // id comes back as { data: { id: null } }. Both must surface a fixture
+    // not_found pointing at get_matches, not an all-null success.
+    globalThis.fetch = mockFetchJson({ data: { id: null } });
+    await expect(toolMap.get("get_fixture_details")!.handler({ fixture_id: 999999999 })).rejects.toMatchObject({
+      kind: "not_found",
+      message: expect.stringContaining("Fixture 999999999"),
+      howToFix: expect.stringContaining("get_matches"),
+    });
+
+    globalThis.fetch = mockFetchJson({ data: { id: null } });
+    await expect(toolMap.get("get_match_preview")!.handler({ id: 999999999 })).rejects.toMatchObject({
+      kind: "not_found",
+      message: expect.stringContaining("Fixture 999999999"),
+    });
   });
 
   it("rejects an unsupported search type", async () => {

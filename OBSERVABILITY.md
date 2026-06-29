@@ -87,18 +87,20 @@ When `error_kind` is `upstream_error` or `not_found`, use this to know which Spo
 
 | Tool | Endpoint(s) |
 | --- | --- |
-| `search` | `/football/players/search/{q}`, `/football/teams/search/{q}`, `/football/leagues/search/{q}`, `/football/coaches/search/{q}` (whichever the `type` selects; all four for `type=all`) |
+| `search` | `/football/players/search/{q}`, `/football/teams/search/{q}`, `/football/leagues/search/{q}`, `/football/coaches/search/{q}`, `/football/referees/search/{q}`, `/football/venues/search/{q}` (whichever the `type` selects; all six for `type=all`) |
 | `get_player` | `/football/players/{id}?include=position;nationality;teams.team` + `/football/teams/{team_id}` |
 | `get_team` | `/football/teams/{id}?include=venue;country;coaches.coach` (the active coach relation supplies the `coach` field) |
 | `get_league` | `/football/leagues/{id}?include=country;currentseason` |
 | `get_coach` | `/football/coaches/{id}?include=nationality;teams.team` (the active team relation supplies `current_team`) |
+| `get_referee` | `/football/referees/{id}?include=nationality;country` (nationality falls back to country; referees have no team) |
+| `get_venue` | `/football/venues/{id}?include=country;city` (full record: capacity, surface, address, coordinates from latitude/longitude) |
 | `get_squad` | `/football/squads/teams/{team_id}` or `/football/squads/seasons/{season_id}/teams/{team_id}` |
 | `get_matches` (upcoming/historic, team) | `/football/fixtures/between/{start}/{end}/{team_id}` |
 | `get_matches` (upcoming/historic, league) | `/football/fixtures/between/{start}/{end}` + `fixtureLeagues:{id}` filter |
 | `get_matches` (live) | `/football/livescores/inplay` |
 | `get_match_preview` | `/football/fixtures/{id}` + `/football/fixtures/head-to-head/{a}/{b}` |
-| `get_fixture_details` | `/football/fixtures/{id}` (with `include=predictions`, the whole request requires the predictions add-on; a missing add-on surfaces as `authentication_error`. The `xg` include maps to the `xGFixture` relation) |
-| `get_standings` | `/football/standings/live/leagues/{id}` first; on empty/404, falls back to `/football/leagues/{id}?include=currentseason` then `/football/standings/seasons/{current_season_id}` |
+| `get_fixture_details` | `/football/fixtures/{id}` (with `include=predictions`, the whole request requires the predictions add-on; a missing add-on surfaces as `authentication_error`. The `xg` include maps to the `xGFixture` relation; the `referees` include maps to `referees.referee`; the `tv_stations` include maps to `tvStations.tvStation` — pivot rows are one per station per broadcast country, deduped MCP-side to unique `{ name, url }`) |
+| `get_standings` | `/football/standings/live/leagues/{id}` first (`include=participant;details;group;round`); on empty/404, falls back to `/football/leagues/{id}?include=currentseason` then `/football/standings/seasons/{current_season_id}` (same includes). group/round surfaced per row; group-stage rows sorted by group then position |
 | `get_historic_seasons` | `/football/leagues/{id}?include=seasons` |
 | `get_topscorers` | `/football/topscorers/seasons/{id}` |
 | `get_odds` (prematch) | `/football/odds/pre-match/fixtures/{fixture_id}` + optional `markets:{id};bookmakers:{id}` filters; on empty data, `/football/fixtures/{fixture_id}` to distinguish "no odds" from "unknown fixture" |
@@ -109,10 +111,17 @@ When `error_kind` is `upstream_error` or `not_found`, use this to know which Spo
 | `get_pressure_index` | `/football/fixtures/{fixture_id}?include=pressure;participants` (one request; team names resolved from participants. summary/timeline shaping is done in-process, not upstream) |
 | `get_transfers` (confirmed) | `/football/transfers/latest`, `/football/transfers/teams/{id}`, `/football/transfers/players/{id}`, or `/football/transfers/between/{start}/{end}` — by timeframe/scope; `include=player;fromteam;toteam` |
 | `get_transfers` (rumour) | same shapes under `/football/transfer-rumours/...` (no `/latest` — unscoped uses the base feed); requires the rumours add-on, a missing add-on surfaces as `authentication_error` |
+| `get_fixture_news` | `/football/fixtures/{fixture_id}?include=prematchnews.lines` and/or `postmatchnews.lines` (by timing); article lines sorted by id and joined into one body in-process |
+| `get_match_facts` | `/football/match-facts/{fixture_id}` — ALL pages fetched (per_page 50; ~15 requests for a rich fixture), then filtered MCP-side by basis/scope/category/natural_language; requires the Match Facts add-on (403 → `authentication_error`); on zero facts, `/football/fixtures/{fixture_id}` distinguishes no-coverage from an unknown fixture |
+| `get_rivals` | `/football/rivals/teams/{team_id}?include=rival` (the `rival` include nests the rival team so names/short_codes resolve; the `team` include would nest the queried team itself, not the rival). Coverage is partial — no rival data returns an empty list, not an error |
+| `get_commentaries` | `/football/commentaries/fixtures/{fixture_id}` — all lines returned in one response (the endpoint ignores page/per_page), then filtered MCP-side to `is_important` (goals + cards) and sorted by `order`. On zero commentary, `/football/fixtures/{fixture_id}` distinguishes no-coverage (empty list) from an unknown fixture (`not_found`) — the commentary endpoint returns 200 + `data:[]` for unknown ids |
+| `get_totw` | `/football/team-of-the-week/leagues/{league_id}/latest?include=player;team;round` — 11 rows returned unordered, sorted MCP-side by `formation_position`; formation/round (repeated per row) lifted to the top level; `position` resolved from the player's `position_id` via the types cache (24 GK / 25 Def / 26 Mid / 27 Attacker). Requires the Team of the Week add-on; an uncovered/round-less league returns 200 + `data:[]`, surfaced as an empty result (not `not_found`) |
 
 Plus startup-only:
-- `/core/types` — paginated, loaded once at startup for the shared type mapping
-- `/football/states` — paginated, loaded once at startup for the shared state mapping
+- `/core/types` — fully walked once at startup for the shared type mapping
+- `/football/states` — fully walked once at startup for the shared state mapping
+
+Multi-page walks (`get_match_facts`, and the two startup fetches above) follow the API's **cursor** when the response provides a `next_cursor` (more stable under concurrent inserts, no COUNT overhead, flat deep-page cost), and fall back to offset paging (`page`/`per_page`) when it doesn't. In a debug URL trace this shows as a first request with `page=1&per_page=50` followed by `cursor=…`-only requests (the API rejects `per_page` alongside `cursor`).
 
 ## Reproducing a Tool Call Locally
 

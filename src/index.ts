@@ -29,6 +29,9 @@ This server exposes focused Sportmonks football tools, including:
 - get_team(id)
 - get_league(id)
 - get_coach(id)
+- get_referee(id)
+- get_venue(id)
+- get_rivals(team_id)
 - get_squad(team_id, season_id?)
 - get_matches(id, type, timeframe?)
 - get_match_preview(id)
@@ -41,6 +44,10 @@ This server exposes focused Sportmonks football tools, including:
 - get_fixture_lineup_stats(fixture_id, player_ids?, stat_types?)
 - get_pressure_index(fixture_id, mode?)
 - get_transfers(id?, entity_type?, type?, timeframe?, start_date?, end_date?)
+- get_fixture_news(fixture_id, timing?)
+- get_match_facts(fixture_id, basis, category?)
+- get_commentaries(fixture_id)
+- get_totw(league_id)
 
 Authentication
 - Set SPORTMONKS_API_TOKEN before starting the server.
@@ -49,30 +56,43 @@ Authentication
 Behavior Notes
 - All tool outputs are valid JSON.
 - List-style tools (search, get_matches, get_topscorers, get_standings, get_squad, get_odds,
-  get_season_stats, get_fixture_lineup_stats, get_transfers) return an envelope
+  get_season_stats, get_fixture_lineup_stats, get_transfers, get_match_facts) return an envelope
   '{ "data": [...], "meta": { "returned", "cap", "possibly_more", "date_window?", "stat_types?" } }'.
   Use 'meta.possibly_more' to detect server-side or local truncation.
 - get_pressure_index returns a '{ "data", "meta" }' envelope where meta is
   '{ "returned", "cap", "possibly_more", "mode" }'; data is mode-dependent (summary aggregates or a
   per-minute timeline), not a flat list.
-- Single-entity tools (get_player, get_team, get_league, get_coach, get_match_preview,
-  get_fixture_details, get_historic_seasons) return a JSON object or array directly, without an envelope.
+- get_fixture_news returns a '{ "data", "meta" }' envelope where data carries prematch/postmatch
+  article arrays (matching the requested timing) and meta is '{ "timing", "returned": { per type } }';
+  each article's lines are sorted by id and joined into one ordered prose 'body'.
+- Single-entity tools (get_player, get_team, get_league, get_coach, get_referee, get_venue,
+  get_match_preview, get_fixture_details, get_historic_seasons) return a JSON object or array directly,
+  without an envelope.
 - Validation errors explain what is wrong and how to fix the request.
 - Search returns at most 25 results; meta.possibly_more flags when more matched upstream.
 - All types and states are fetched on startup and used to build shared mappings.
 - get_player uses the exact two-step player/team lookup flow to resolve the current team name.
-- search supports types player, team, league, coach, and all.
+- search supports types player, team, league, coach, referee, venue, and all.
 - get_coach mirrors get_player: id, name, nationality, date_of_birth, current_team (the active appointment).
+- get_referee mirrors get_coach minus current_team (referees have no team): id, name, nationality, date_of_birth.
+- get_venue returns the full stadium record: id, name, city, country, capacity, surface, address, coordinates
+  ({ latitude, longitude }). A team's venue (in get_team) stays lean (name only); this standalone returns everything.
+- get_rivals returns a team's traditional rivals (per team): a '{ data, meta }' envelope where each rival has
+  rival_team_id, rival_team_name, rival_short_code, and meta is '{ team_id, returned }'. Empty list when a
+  team has no rival data (coverage is partial).
 - get_team includes the current coach ({ id, name }); null when no active coach is recorded.
 - get_matches limits output to:
   - upcoming: 14 days ahead, max 20 fixtures
   - historic: 30 days back, max 20 fixtures
   - live: max 20 fixtures
 - get_match_preview only works for fixtures that have not started yet.
-- get_fixture_details supports includes: lineups, events, statistics, predictions, xg. The predictions
-  include returns curated probabilities (percentages, 0-100) plus value bets and requires a
-  subscription with the predictions add-on. The xg include returns Expected Goals (xG) and Expected
-  Goals on Target (xGoT) per team; empty array for upcoming fixtures or fixtures without xG coverage.
+- get_fixture_details supports includes: lineups, events, statistics, predictions, xg, referees,
+  tv_stations. The predictions include returns curated probabilities (percentages, 0-100) plus value
+  bets and requires a subscription with the predictions add-on. The xg include returns Expected Goals
+  (xG) and Expected Goals on Target (xGoT) per team; empty array for upcoming fixtures or fixtures
+  without xG coverage. The referees include returns the match officials (referee_id, name, type/role).
+  The tv_stations include returns the broadcasters showing the fixture ({ name, url }), deduplicated
+  across regions (Sportmonks lists one row per station per country); empty array when none are listed.
 - get_odds returns at most 'limit' entries (default 50, max 200) sorted by market then bookmaker.
   An unfiltered fixture can carry thousands of odds upstream, so narrow with market_id and/or
   bookmaker_id. type='premium' requires a subscription that includes the premium odds feed.
@@ -87,6 +107,25 @@ Behavior Notes
   (max 31-day window — the Sportmonks limit), for confirmed transfers or rumours (type='rumour'
   needs an add-on). Capped at 25. An unscoped query (no id) must set timeframe explicitly; a
   scoped query defaults to latest.
+- get_fixture_news returns pre-match previews and/or post-match reports for a fixture (timing
+  prematch/postmatch/both, default prematch). Pre-match coverage is limited to top European
+  competitions; a fixture with no news returns empty arrays, not an error.
+- get_match_facts returns curated match insights for a fixture. basis (h2h | team) is required;
+  optional category filter. Always league_matches-scoped with non-null natural_language; each fact
+  carries both the sentence and raw data. Capped at 100. statistic_comparisons is team-only;
+  requires the Match Facts add-on; coverage varies by league.
+- get_commentaries returns a fixture's key commentary moments — goals and cards (the is_important
+  lines) sorted chronologically. Returns a '{ data, meta }' envelope where each line is
+  '{ minute, comment, is_goal }' (minute folds stoppage time as "45+9"; is_goal is true for a goal,
+  false for a card) and meta is '{ fixture_id, returned }'. A fixture with no commentary returns an
+  empty list, not an error; coverage varies by competition. Full play-by-play is deferred.
+- get_totw returns the latest Team of the Week for a league: the 11 highest-rated players of the most
+  recently completed round. Shape is '{ league_id, round, formation, players, meta }' where each player
+  is '{ formation_position, position, player_id, player_name, team_id, team_name, team_short_code,
+  rating }' sorted by formation_position (goalkeeper first); formation and the round summary
+  ({ id, name, starting_at, ending_at, finished }) sit at the top level; meta is
+  '{ returned, scope, league_id, round_id }'. Requires the Team of the Week add-on; round-based
+  competitions only, so a league with no TOTW returns an empty players list (not an error).
 
 Related Resources
 - sportmonks://documentation: this overview.
@@ -100,7 +139,7 @@ Official References
 - Best practices: https://docs.sportmonks.com/v3/welcome/best-practices
 `.trim();
 
-const SPORTMONKS_SERVER_VERSION = "1.2.0";
+const SPORTMONKS_SERVER_VERSION = "1.4.0";
 const MAX_SEARCH_RESULTS = 25;
 const MAX_MATCH_RESULTS = 20;
 const DEFAULT_ODDS_RESULTS = 50;
@@ -169,6 +208,19 @@ const MAX_PRESSURE_SWINGS = 5;
 // error. (The originating ticket assumed a 6-month window; the real API is 31 days.)
 const MAX_TRANSFER_RESULTS = 25;
 const MAX_TRANSFER_RANGE_DAYS = 31;
+
+// A fixture carries 400-800 raw match facts across many pages; after the fixed
+// filters (scope=league_matches, natural_language!=null) a rich fixture yields
+// ~85-90 per basis (verified live). Cap at 100 — above the observed/expected max
+// so typical fixtures aren't truncated, with possibly_more as the safety valve.
+const MAX_MATCH_FACTS_RESULTS = 100;
+const MATCH_FACT_CATEGORIES = [
+  "statistics",
+  "streaks",
+  "players",
+  "coaches",
+  "statistic_comparisons",
+] as const;
 const UPCOMING_WINDOW_DAYS = 14;
 const HISTORIC_WINDOW_DAYS = 30;
 const API_TIMEOUT_MS = 20_000;
@@ -176,11 +228,18 @@ const API_TIMEOUT_MS = 20_000;
 // ── Types ────────────────────────────────────────────────────────────────────
 
 type ParamValue = string | number | boolean | undefined;
-type SearchEntityType = "player" | "team" | "league" | "coach" | "all";
-type EntityType = "player" | "team" | "league" | "coach";
+type SearchEntityType = "player" | "team" | "league" | "coach" | "referee" | "venue" | "all";
+type EntityType = "player" | "team" | "league" | "coach" | "referee" | "venue";
 type MatchEntityType = "team" | "league";
 type MatchTimeframe = "live" | "historic" | "upcoming";
-type FixtureDetailInclude = "lineups" | "events" | "statistics" | "predictions" | "xg";
+type FixtureDetailInclude =
+  | "lineups"
+  | "events"
+  | "statistics"
+  | "predictions"
+  | "xg"
+  | "referees"
+  | "tv_stations";
 type TopscorerType = "goals" | "assists" | "cards";
 type OddsFeedType = "prematch" | "premium";
 type SeasonStatsEntityType = "player" | "team";
@@ -188,6 +247,14 @@ type PressureMode = "summary" | "timeline";
 type TransferType = "confirmed" | "rumour";
 type TransferTimeframe = "latest" | "date_range";
 type TransferEntityType = "team" | "player";
+type NewsTiming = "prematch" | "postmatch" | "both";
+type MatchFactBasis = "h2h" | "team";
+type MatchFactCategory =
+  | "statistics"
+  | "streaks"
+  | "players"
+  | "coaches"
+  | "statistic_comparisons";
 type ToolErrorKind =
   | "authentication_error"
   | "not_found"
@@ -547,6 +614,41 @@ function getSingleResponseItem(payload: unknown, label: string) {
   return items[0];
 }
 
+function getRequiredEntity(payload: unknown, label: string) {
+  // Sportmonks doesn't reliably 404 on unknown ids — for a top-level entity
+  // lookup it can return 200 with a placeholder record whose fields (including
+  // `id`) are all null. A bare getSingleResponseItem would hand that back as a
+  // success, so a bad id would masquerade as an entity with empty fields.
+  // Require a numeric `id` and surface not_found otherwise (mirrors
+  // getEntityReference's contract).
+  const item = getSingleResponseItem(payload, label);
+  if (getNumber(item, ["id"]) === null) {
+    throw new SportmonksToolError(
+      "not_found",
+      `${label} was not found in Sportmonks.`,
+      `Verify the id is correct and available in your Sportmonks subscription. If needed, use the 'search' tool first.`,
+    );
+  }
+
+  return item;
+}
+
+function getRequiredFixture(payload: unknown, fixtureId: number) {
+  // Same id-less-placeholder guard as getRequiredEntity, but with the
+  // fixture-specific not_found message: 'search' can't find fixture ids, so
+  // point the caller at get_matches (matches assertFixtureExists's wording).
+  const fixture = getSingleResponseItem(payload, "Fixture");
+  if (getNumber(fixture, ["id"]) === null) {
+    throw new SportmonksToolError(
+      "not_found",
+      `Fixture ${fixtureId} was not found in Sportmonks.`,
+      "Verify the fixture id is correct and available in your Sportmonks subscription. Use get_matches to find a valid fixture id.",
+    );
+  }
+
+  return fixture;
+}
+
 function getPreferredName(record: unknown) {
   // Sportmonks occasionally returns names with trailing whitespace
   // (e.g. "Bernardo Silva  ", "Rúben Dias "). Trim so downstream string
@@ -717,15 +819,42 @@ async function apiRequest(
   );
 }
 
+function extractCursor(nextCursor: string | null): string | null {
+  // Sportmonks returns next_cursor as a full follow URL
+  // (".../endpoint?cursor=<token>"); the docs also show a bare token. Pull the
+  // token either way so it composes with our own endpoint/baseUrl. null when
+  // absent or empty.
+  if (nextCursor === null || nextCursor === "") {
+    return null;
+  }
+  try {
+    const value = new URL(nextCursor).searchParams.get("cursor");
+    return value && value.length > 0 ? value : null;
+  } catch {
+    return nextCursor;
+  }
+}
+
 async function fetchAllPages(
   endpoint: string,
   options: ApiRequestOptions = {},
 ) {
   const allItems: JsonRecord[] = [];
+  // Prefer the API's cursor when it offers one: stable under concurrent inserts
+  // (no skipped/duplicated rows mid-walk), no COUNT overhead, and flat deep-page
+  // cost. The first request is offset-style to set per_page and obtain the first
+  // cursor; cursor requests must NOT carry per_page/order — Sportmonks 400s
+  // ("per_page cannot be used together with cursor"), and the token already
+  // encodes both. Falls back to page-incrementing for any endpoint that returns
+  // no next_cursor. page advances every iteration so the fallback stays aligned
+  // with the cursor walk (per_page is constant at 50).
+  let cursor: string | null = null;
   let page = 1;
 
   while (true) {
-    const payload = await apiRequest(endpoint, { page, per_page: 50, order: "asc" }, options);
+    const params: Record<string, ParamValue> =
+      cursor !== null ? { cursor } : { page, per_page: 50, order: "asc" };
+    const payload = await apiRequest(endpoint, params, options);
     allItems.push(...getResponseItems(payload));
 
     const hasMore = getBoolean(payload, ["pagination", "has_more"]);
@@ -733,6 +862,7 @@ async function fetchAllPages(
       break;
     }
 
+    cursor = extractCursor(getString(payload, ["pagination", "next_cursor"]));
     page += 1;
   }
 
@@ -868,6 +998,8 @@ interface ListMeta {
   possibly_more: boolean;
   date_window?: { start: string; end: string };
   stat_types?: string[];
+  basis?: string;
+  category?: string[] | null;
 }
 
 function buildListMeta(
@@ -1241,12 +1373,22 @@ function mapStanding(record: unknown) {
     getStandingStat(details, [179], ["goal-difference", "overall-goal-difference"]) ??
     (goalsFor !== null && goalsAgainst !== null ? goalsFor - goalsAgainst : null);
 
+  // group is present for group-stage competitions (World Cup, CL league phase,
+  // MLS conferences); null for ordinary single-table leagues. round is the
+  // matchday the standing reflects (name is the round number, e.g. "18").
+  const group = readPath(record, ["group"]);
+  const groupId = getNumber(group, ["id"]) ?? getNumber(record, ["group_id"]);
+  const round = readPath(record, ["round"]);
+  const roundId = getNumber(round, ["id"]) ?? getNumber(record, ["round_id"]);
+
   return {
     position: getNumber(record, ["position"]),
     team: {
       id: getNumber(participant, ["id"]) ?? getNumber(record, ["participant_id"]),
       name: getPreferredName(participant),
     },
+    group: groupId !== null ? { id: groupId, name: getPreferredName(group) } : null,
+    round: roundId !== null ? { id: roundId, name: getPreferredName(round) } : null,
     played: getStandingStat(details, [129], ["overall-matches-played"]),
     won: getStandingStat(details, [130], ["overall-won"]),
     drawn: getStandingStat(details, [131], ["overall-draw"]),
@@ -1254,6 +1396,18 @@ function mapStanding(record: unknown) {
     gd: goalDifference,
     points: getStandingStat(details, [187], ["overall-points"]) ?? getNumber(record, ["points"]),
   };
+}
+
+function sortStandings(rows: ReturnType<typeof mapStanding>[]) {
+  // Group-stage tables come back with per-group positions (each group restarts
+  // at 1), so order by group name then position to read coherently. Ordinary
+  // leagues have no group (all "") and fall through to pure position order.
+  return [...rows].sort((left, right) => {
+    const leftGroup = left.group?.name ?? "";
+    const rightGroup = right.group?.name ?? "";
+    if (leftGroup !== rightGroup) return leftGroup.localeCompare(rightGroup);
+    return (left.position ?? Number.MAX_SAFE_INTEGER) - (right.position ?? Number.MAX_SAFE_INTEGER);
+  });
 }
 
 function mapOdd(record: unknown) {
@@ -1295,10 +1449,12 @@ async function fetchSearchResults(query: string, type: SearchEntityType) {
     team: () => apiRequest(`/teams/search/${encodeURIComponent(query)}`, baseParams),
     league: () => apiRequest(`/leagues/search/${encodeURIComponent(query)}`, baseParams),
     coach: () => apiRequest(`/coaches/search/${encodeURIComponent(query)}`, baseParams),
+    referee: () => apiRequest(`/referees/search/${encodeURIComponent(query)}`, baseParams),
+    venue: () => apiRequest(`/venues/search/${encodeURIComponent(query)}`, baseParams),
   };
 
   const entityTypes: Array<Exclude<SearchEntityType, "all">> =
-    type === "all" ? ["player", "team", "league", "coach"] : [type];
+    type === "all" ? ["player", "team", "league", "coach", "referee", "venue"] : [type];
 
   const payloads = await Promise.all(entityTypes.map((entityType) => entityLoaders[entityType]()));
 
@@ -1355,7 +1511,7 @@ async function fetchEntity(id: number, type: EntityType) {
       const payload = await apiRequest(`/players/${id}`, {
         include: "position;nationality;teams.team",
       });
-      const player = getSingleResponseItem(payload, "Player");
+      const player = getRequiredEntity(payload, "Player");
       const candidates = orderedClubCandidates(player);
 
       // Walk candidates club-first; if the candidate's type isn't visible in
@@ -1402,7 +1558,7 @@ async function fetchEntity(id: number, type: EntityType) {
       // coaches.coach brings the nested Coach object so we can name the current
       // manager without a second roundtrip.
       const teamPayload = await apiRequest(`/teams/${id}`, { include: "venue;country;coaches.coach" });
-      const team = getSingleResponseItem(teamPayload, "Team");
+      const team = getRequiredEntity(teamPayload, "Team");
       const coachRelation = getCurrentRelation(toRecordArray(readPath(team, ["coaches"])));
       const coach = coachRelation ? readPath(coachRelation, ["coach"]) : null;
 
@@ -1425,7 +1581,7 @@ async function fetchEntity(id: number, type: EntityType) {
       const payload = await apiRequest(`/coaches/${id}`, {
         include: "nationality;teams.team",
       });
-      const coach = getSingleResponseItem(payload, "Coach");
+      const coach = getRequiredEntity(payload, "Coach");
       const currentRelation = getCurrentRelation(toRecordArray(readPath(coach, ["teams"])));
       const team = currentRelation ? readPath(currentRelation, ["team"]) : null;
 
@@ -1442,9 +1598,46 @@ async function fetchEntity(id: number, type: EntityType) {
           : null,
       };
     }
+    case "referee": {
+      // Referees have no team. nationality is typically null on the referee
+      // record; the populated origin lives in `country`, so fall back to it.
+      const payload = await apiRequest(`/referees/${id}`, {
+        include: "nationality;country",
+      });
+      const referee = getRequiredEntity(payload, "Referee");
+
+      return {
+        id: getNumber(referee, ["id"]),
+        name: getPreferredName(referee),
+        nationality:
+          getPreferredName(readPath(referee, ["nationality"])) ??
+          getPreferredName(readPath(referee, ["country"])),
+        date_of_birth: getString(referee, ["date_of_birth"]),
+      };
+    }
+    case "venue": {
+      // Direct venue lookups return the full record incl. address and
+      // coordinates (the lean fixture/team venue trims those).
+      const payload = await apiRequest(`/venues/${id}`, { include: "country;city" });
+      const venue = getRequiredEntity(payload, "Venue");
+      const latitude = getNumber(venue, ["latitude"]);
+      const longitude = getNumber(venue, ["longitude"]);
+
+      return {
+        id: getNumber(venue, ["id"]),
+        name: getPreferredName(venue),
+        city: getString(venue, ["city_name"]) ?? getPreferredName(readPath(venue, ["city"])),
+        country: getPreferredName(readPath(venue, ["country"])),
+        capacity: getNumber(venue, ["capacity"]),
+        surface: getString(venue, ["surface"]),
+        address: getString(venue, ["address"]),
+        coordinates:
+          latitude !== null && longitude !== null ? { latitude, longitude } : null,
+      };
+    }
     case "league": {
       const payload = await apiRequest(`/leagues/${id}`, { include: "country;currentseason" });
-      const league = getSingleResponseItem(payload, "League");
+      const league = getRequiredEntity(payload, "League");
       const currentSeason = readPath(league, ["currentseason"]);
 
       return {
@@ -1474,6 +1667,41 @@ async function getLeague(id: number) {
 
 async function getCoach(id: number) {
   return jsonResponse(await fetchEntity(id, "coach"));
+}
+
+async function getReferee(id: number) {
+  return jsonResponse(await fetchEntity(id, "referee"));
+}
+
+async function getVenue(id: number) {
+  return jsonResponse(await fetchEntity(id, "venue"));
+}
+
+function mapRival(record: unknown) {
+  // The raw row is just { team_id, rival_id }; the `rival` include nests the
+  // rival team so we can return its name and short code.
+  const rival = readPath(record, ["rival"]);
+  return {
+    rival_team_id: getNumber(rival, ["id"]) ?? getNumber(record, ["rival_id"]),
+    rival_team_name: getPreferredName(rival),
+    rival_short_code: getString(rival, ["short_code"]),
+  };
+}
+
+async function fetchRivals(teamId: number) {
+  // Rivals are a tiny per-team list (no pagination/cap). A team with no rival
+  // data returns an empty list, not an error (coverage is partial).
+  const payload = await apiRequest(`/rivals/teams/${teamId}`, { include: "rival" });
+  const data = getResponseItems(payload)
+    .map(mapRival)
+    .filter((rival) => rival.rival_team_id !== null);
+
+  return { data, meta: { team_id: teamId, returned: data.length } };
+}
+
+async function getRivals(teamId: number) {
+  const { data, meta } = await fetchRivals(teamId);
+  return jsonResponse({ data, meta });
 }
 
 async function fetchMatches(id: number, type: MatchEntityType, timeframe: MatchTimeframe) {
@@ -1618,7 +1846,7 @@ async function fetchMatchPreview(id: number) {
   const fixturePayload = await apiRequest(`/fixtures/${id}`, {
     include: "participants",
   });
-  const fixture = getSingleResponseItem(fixturePayload, "Fixture");
+  const fixture = getRequiredFixture(fixturePayload, id);
 
   if (fixtureHasStarted(fixture)) {
     throw new SportmonksToolError(
@@ -1695,6 +1923,14 @@ async function fetchFixtureDetails(
     if (entry === "xg") {
       return ["xGFixture"];
     }
+    // referees.referee nests the official's profile so we can name each one.
+    if (entry === "referees") {
+      return ["referees.referee"];
+    }
+    // tvStations comes back as pivot rows; nest tvStation for name/url.
+    if (entry === "tv_stations") {
+      return ["tvStations.tvStation"];
+    }
     return [entry];
   });
   const includeValue = ["participants", "scores", "league", "state", ...expandedIncludes].join(";");
@@ -1724,7 +1960,7 @@ async function fetchFixtureDetails(
     throw error;
   }
 
-  const fixture = getSingleResponseItem(payload, "Fixture");
+  const fixture = getRequiredFixture(payload, fixtureId);
   const { home, away } = getHomeAndAwayParticipants(fixture);
   const scoreSummary = getFixtureScoreSummary(fixture);
 
@@ -1924,6 +2160,47 @@ async function fetchFixtureDetails(
     };
   }
 
+  if (includes.includes("referees")) {
+    // Each assignment row carries a type_id for the official's role (6 Referee,
+    // 7 1st Assistant, 8 2nd Assistant, 9 4th Official, VAR, ...) and a nested
+    // referee object for the name. Empty when officials aren't published.
+    response.referees = toRecordArray(readPath(fixture, ["referees"])).map((assignment) => {
+      const referee = readPath(assignment, ["referee"]);
+      return {
+        referee_id: getNumber(assignment, ["referee_id"]) ?? getNumber(referee, ["id"]),
+        name: getPreferredName(referee),
+        type:
+          getTypeLookupLabel(getNumber(assignment, ["type_id"])) ??
+          getPreferredName(readPath(assignment, ["type"])),
+      };
+    });
+  }
+
+  if (includes.includes("tv_stations")) {
+    // The tvStations include returns pivot rows — one per station PER broadcast
+    // country — so a single channel repeats dozens of times (a global fixture
+    // can have 600+ rows but only ~50 distinct channels). Dedupe by station id
+    // and curate to { name, url }; the logo image_path is dropped. Sorted by
+    // name for stable output. Empty when no broadcasters are listed.
+    const byStation = new Map<number, { name: string | null; url: string | null }>();
+    for (const row of toRecordArray(readPath(fixture, ["tvstations"]))) {
+      const station = readPath(row, ["tvstation"]);
+      const stationId = getNumber(station, ["id"]) ?? getNumber(row, ["tvstation_id"]);
+      if (stationId === null) continue;
+      const entry = { name: getString(station, ["name"]), url: getString(station, ["url"]) };
+      const existing = byStation.get(stationId);
+      // First row for a station wins, but a later row that resolves the nested
+      // station upgrades a nameless placeholder left by an earlier row whose
+      // station relation didn't expand (order of pivot rows isn't guaranteed).
+      if (!existing || (existing.name === null && entry.name !== null)) {
+        byStation.set(stationId, entry);
+      }
+    }
+    response.tv_stations = [...byStation.values()].sort(
+      (left, right) => (left.name ?? "").localeCompare(right.name ?? ""),
+    );
+  }
+
   return response;
 }
 
@@ -1952,10 +2229,10 @@ async function fetchStandings(leagueId: number) {
   let liveUpstreamHasMore: boolean | null = null;
   try {
     const livePayload = await apiRequest(`/standings/live/leagues/${leagueId}`, {
-      include: "participant;details",
+      include: "participant;details;group;round",
       per_page: STANDINGS_PER_PAGE,
     });
-    liveRows = getResponseItems(livePayload).map(mapStanding).filter(isUsableStandingRow);
+    liveRows = sortStandings(getResponseItems(livePayload).map(mapStanding).filter(isUsableStandingRow));
     liveUpstreamHasMore = getBoolean(livePayload, ["pagination", "has_more"]);
   } catch (error) {
     if (!(error instanceof SportmonksToolError) || error.kind !== "not_found") {
@@ -1989,10 +2266,10 @@ async function fetchStandings(leagueId: number) {
   }
 
   const seasonPayload = await apiRequest(`/standings/seasons/${currentSeasonId}`, {
-    include: "participant;details",
+    include: "participant;details;group;round",
     per_page: STANDINGS_PER_PAGE,
   });
-  const seasonRows = getResponseItems(seasonPayload).map(mapStanding).filter(isUsableStandingRow);
+  const seasonRows = sortStandings(getResponseItems(seasonPayload).map(mapStanding).filter(isUsableStandingRow));
   const upstreamHasMore = getBoolean(seasonPayload, ["pagination", "has_more"]);
   return {
     data: seasonRows,
@@ -2742,6 +3019,275 @@ async function getTransfers(params: {
   return jsonResponse(listResponse(data, meta));
 }
 
+function mapNewsArticle(record: unknown) {
+  // Lines come back out of order (pre-match shuffled across introduction/home/
+  // away; post-match shuffled within type "line"), so sort by id ascending —
+  // the publish order — before joining into one prose body. Per-line id /
+  // newsitem_id / type are dropped; the body is ordered paragraphs only.
+  const body = toRecordArray(readPath(record, ["lines"]))
+    .slice()
+    .sort((left, right) => (getNumber(left, ["id"]) ?? 0) - (getNumber(right, ["id"]) ?? 0))
+    .map((line) => getString(line, ["text"]))
+    .filter((text): text is string => text !== null)
+    .join("\n\n");
+
+  return {
+    id: getNumber(record, ["id"]),
+    title: getString(record, ["title"]),
+    type: getString(record, ["type"]),
+    league_id: getNumber(record, ["league_id"]),
+    body,
+  };
+}
+
+async function fetchFixtureNews(fixtureId: number, timing: NewsTiming) {
+  const wantPrematch = timing === "prematch" || timing === "both";
+  const wantPostmatch = timing === "postmatch" || timing === "both";
+
+  const includes = [
+    ...(wantPrematch ? ["prematchnews.lines"] : []),
+    ...(wantPostmatch ? ["postmatchnews.lines"] : []),
+  ].join(";");
+
+  const notFound = new SportmonksToolError(
+    "not_found",
+    `Fixture ${fixtureId} was not found in Sportmonks.`,
+    "Verify the fixture id is correct and available in your Sportmonks subscription. Use get_matches to find a valid fixture id.",
+  );
+
+  let payload: unknown;
+  try {
+    payload = await apiRequest(`/fixtures/${fixtureId}`, { include: includes });
+  } catch (error) {
+    if (error instanceof SportmonksToolError && error.kind === "not_found") {
+      throw notFound;
+    }
+    throw error;
+  }
+
+  const fixture = getResponseItems(payload)[0] ?? null;
+  if (fixture === null || getNumber(fixture, ["id"]) === null) {
+    throw notFound;
+  }
+
+  const data: JsonRecord = {};
+  const returned: JsonRecord = {};
+  if (wantPrematch) {
+    const articles = toRecordArray(readPath(fixture, ["prematchnews"])).map(mapNewsArticle);
+    data.prematch = articles;
+    returned.prematch = articles.length;
+  }
+  if (wantPostmatch) {
+    const articles = toRecordArray(readPath(fixture, ["postmatchnews"])).map(mapNewsArticle);
+    data.postmatch = articles;
+    returned.postmatch = articles.length;
+  }
+
+  return { data, meta: { timing, returned } };
+}
+
+async function getFixtureNews(fixtureId: number, timing: NewsTiming) {
+  const { data, meta } = await fetchFixtureNews(fixtureId, timing);
+  return jsonResponse({ data, meta });
+}
+
+function mapMatchFact(record: unknown) {
+  // Both the natural_language sentence and the raw data object are returned.
+  // basis/scope are fixed by the query, fixture_id is the input, id/sport_id
+  // are noise — drop them.
+  return {
+    type_id: getNumber(record, ["type_id"]),
+    category: getString(record, ["category"]),
+    participant: getString(record, ["participant"]),
+    natural_language: getString(record, ["natural_language"]),
+    data: readPath(record, ["data"]) ?? null,
+  };
+}
+
+async function fetchMatchFacts(
+  fixtureId: number,
+  basis: MatchFactBasis,
+  categories: MatchFactCategory[],
+) {
+  // statistic_comparisons facts only exist for basis=team (verified live: all
+  // 64 were basis=team). Fail fast before the multi-page fetch.
+  if (basis === "h2h" && categories.includes("statistic_comparisons")) {
+    throw new SportmonksToolError(
+      "validation_error",
+      "The 'statistic_comparisons' category is only available for basis='team', not 'h2h'.",
+      "Call the tool again with basis='team', or drop 'statistic_comparisons' from category.",
+    );
+  }
+
+  const categoryFilter = categories.length > 0 ? new Set<string>(categories) : null;
+
+  const buildMeta = (returned: number, possiblyMore: boolean): ListMeta => ({
+    returned,
+    cap: MAX_MATCH_FACTS_RESULTS,
+    possibly_more: possiblyMore,
+    basis,
+    category: categoryFilter ? [...categories] : null,
+  });
+
+  // The endpoint offers no basis/scope/category filter (only matchFactTypes),
+  // so fetch every page and filter MCP-side.
+  let allFacts: JsonRecord[];
+  try {
+    allFacts = await fetchAllPages(`/match-facts/${fixtureId}`);
+  } catch (error) {
+    if (error instanceof SportmonksToolError && error.kind === "authentication_error") {
+      throw new SportmonksToolError(
+        "authentication_error",
+        "Sportmonks rejected the match facts request. Match Facts require a subscription with the Match Facts add-on.",
+        "Verify the subscription includes the Match Facts add-on. If other tools work, this fixture's data may simply not be covered.",
+        error.details,
+      );
+    }
+    throw error;
+  }
+
+  // Fixed filters: league_matches scope, non-null natural_language, requested
+  // basis; then the optional category filter.
+  const filtered = allFacts.filter((fact) => {
+    if (getString(fact, ["scope"]) !== "league_matches") return false;
+    if (getString(fact, ["natural_language"]) === null) return false;
+    if (getString(fact, ["basis"]) !== basis) return false;
+    if (categoryFilter && !categoryFilter.has(getString(fact, ["category"]) ?? "")) return false;
+    return true;
+  });
+
+  if (allFacts.length === 0) {
+    // No facts at all — distinguish an unknown fixture from one with no Match
+    // Facts coverage (availability varies by league).
+    await assertFixtureExists(fixtureId);
+    return { data: [], meta: buildMeta(0, false) };
+  }
+
+  const data = filtered.slice(0, MAX_MATCH_FACTS_RESULTS).map(mapMatchFact);
+  return { data, meta: buildMeta(data.length, filtered.length > MAX_MATCH_FACTS_RESULTS) };
+}
+
+async function getMatchFacts(
+  fixtureId: number,
+  basis: MatchFactBasis,
+  categories: MatchFactCategory[],
+) {
+  const { data, meta } = await fetchMatchFacts(fixtureId, basis, categories);
+  return jsonResponse(listResponse(data, meta));
+}
+
+function formatCommentaryMinute(minute: number | null, extraMinute: number | null) {
+  // Fold stoppage time into the minute label: minute 45 + extra 9 -> "45+9".
+  // Plain minutes stay numeric (matching the events shape); null when the line
+  // has no clock (e.g. "First Half starts.").
+  if (minute === null) return null;
+  return extraMinute !== null ? `${minute}+${extraMinute}` : minute;
+}
+
+function mapCommentary(record: unknown) {
+  // is_goal distinguishes a goal from a card. id / fixture_id / order /
+  // is_important are dropped — the caller already filtered to key moments and
+  // re-sorted by order.
+  return {
+    minute: formatCommentaryMinute(getNumber(record, ["minute"]), getNumber(record, ["extra_minute"])),
+    comment: getString(record, ["comment"]),
+    is_goal: getBoolean(record, ["is_goal"]) === true,
+  };
+}
+
+async function fetchCommentaries(fixtureId: number) {
+  const payload = await apiRequest(`/commentaries/fixtures/${fixtureId}`);
+  const all = getResponseItems(payload);
+
+  if (all.length === 0) {
+    // No commentary at all — distinguish an unknown fixture from one with no
+    // commentary coverage (the unknown-fixture case returns 200 + data:[], not
+    // a 404). Coverage varies by competition; many fixtures have none.
+    await assertFixtureExists(fixtureId);
+    return { data: [], meta: { fixture_id: fixtureId, returned: 0 } };
+  }
+
+  // Key moments only: goals + cards (the is_important lines). Full play-by-play
+  // (~110 lines/match) is deferred until the MCP has general pagination. Sort by
+  // the API's order field so the moments read chronologically.
+  const data = all
+    .filter((line) => getBoolean(line, ["is_important"]) === true)
+    .sort((left, right) => (getNumber(left, ["order"]) ?? 0) - (getNumber(right, ["order"]) ?? 0))
+    .map(mapCommentary);
+
+  return { data, meta: { fixture_id: fixtureId, returned: data.length } };
+}
+
+async function getCommentaries(fixtureId: number) {
+  const { data, meta } = await fetchCommentaries(fixtureId);
+  return jsonResponse({ data, meta });
+}
+
+function mapTotwPlayer(record: unknown) {
+  // Each row carries the rating plus nested player/team. position_id is the
+  // broad role (24 GK, 25 Def, 26 Mid, 27 Attacker) resolved via the types
+  // cache; player_name uses the trimmed display_name; rating is numeric in the
+  // current API but getNumber also coerces the older string form. Raw nested
+  // noise (image paths, height/weight, detailed ids) is dropped.
+  const player = readPath(record, ["player"]);
+  const team = readPath(record, ["team"]);
+  const positionId = getNumber(player, ["position_id"]);
+  return {
+    formation_position: getNumber(record, ["formation_position"]),
+    position: positionId !== null ? getTypeLookupLabel(positionId) : null,
+    player_id: getNumber(player, ["id"]) ?? getNumber(record, ["player_id"]),
+    player_name: getPreferredName(player),
+    team_id: getNumber(team, ["id"]) ?? getNumber(record, ["team_id"]),
+    team_name: getPreferredName(team),
+    team_short_code: getString(team, ["short_code"]),
+    rating: getNumber(record, ["rating"]),
+  };
+}
+
+async function fetchTotw(leagueId: number) {
+  // Latest Team of the Week for a league: 11 rows, returned unordered, each
+  // repeating the same formation and round. Sort by formation_position
+  // (goalkeeper first) and surface formation/round once at the top level. A
+  // league with no TOTW (knockout, uncovered, or beta gap) comes back as 200
+  // with an empty array — return an empty result, not an error.
+  const payload = await apiRequest(`/team-of-the-week/leagues/${leagueId}/latest`, {
+    include: "player;team;round",
+  });
+  const rows = getResponseItems(payload);
+  const players = rows
+    .map(mapTotwPlayer)
+    .sort((left, right) => (left.formation_position ?? 0) - (right.formation_position ?? 0));
+
+  const firstRound = readPath(rows[0] ?? null, ["round"]);
+  const round = firstRound
+    ? {
+        id: getNumber(firstRound, ["id"]),
+        name: getString(firstRound, ["name"]),
+        starting_at: getString(firstRound, ["starting_at"]),
+        ending_at: getString(firstRound, ["ending_at"]),
+        finished: getBoolean(firstRound, ["finished"]),
+      }
+    : null;
+  const formation = getString(rows[0] ?? null, ["formation"]);
+
+  return {
+    league_id: leagueId,
+    round,
+    formation,
+    players,
+    meta: {
+      returned: players.length,
+      scope: "latest",
+      league_id: leagueId,
+      round_id: round?.id ?? null,
+    },
+  };
+}
+
+async function getTotw(leagueId: number) {
+  return jsonResponse(await fetchTotw(leagueId));
+}
+
 async function getEntityReference(id: number, type: EntityType) {
   // Sportmonks doesn't reliably 404 on unknown ids — depending on plan it can
   // return 200 with `data: []`, `data: {}`, or `data: {/* placeholder with no id */}`.
@@ -2754,9 +3300,23 @@ async function getEntityReference(id: number, type: EntityType) {
         ? `/players/${id}`
         : type === "coach"
           ? `/coaches/${id}`
-          : `/leagues/${id}`;
+          : type === "referee"
+            ? `/referees/${id}`
+            : type === "venue"
+              ? `/venues/${id}`
+              : `/leagues/${id}`;
   const label =
-    type === "team" ? "Team" : type === "player" ? "Player" : type === "coach" ? "Coach" : "League";
+    type === "team"
+      ? "Team"
+      : type === "player"
+        ? "Player"
+        : type === "coach"
+          ? "Coach"
+          : type === "referee"
+            ? "Referee"
+            : type === "venue"
+              ? "Venue"
+              : "League";
   const payload = await apiRequest(path);
   const item = getSingleResponseItem(payload, label);
   if (getNumber(item, ["id"]) === null) {
@@ -2773,7 +3333,7 @@ async function getEntityReference(id: number, type: EntityType) {
 const tools: ToolDefinition[] = [
   {
     name: "search",
-    description: "Search Sportmonks players, teams, leagues, coaches, or all supported entity types.",
+    description: "Search Sportmonks players, teams, leagues, coaches, referees, venues, or all supported entity types.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2783,7 +3343,7 @@ const tools: ToolDefinition[] = [
         },
         type: {
           type: "string",
-          enum: ["player", "team", "league", "coach", "all"],
+          enum: ["player", "team", "league", "coach", "referee", "venue", "all"],
           description: "Entity type to search. Defaults to 'all'.",
         },
       },
@@ -2795,7 +3355,7 @@ const tools: ToolDefinition[] = [
       const type = requireEnumValue(
         args.type,
         "type",
-        ["player", "team", "league", "coach", "all"],
+        ["player", "team", "league", "coach", "referee", "venue", "all"],
         "all",
       );
       return searchEntities(query, type);
@@ -2875,6 +3435,65 @@ const tools: ToolDefinition[] = [
       await initializeReferenceData();
       const id = requirePositiveInteger(args.id, "id");
       return getCoach(id);
+    },
+  },
+  {
+    name: "get_referee",
+    description: "Gets referee (match official) details by Sportmonks referee id.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: {
+          type: "integer",
+          description: "Sportmonks referee id.",
+        },
+      },
+      required: ["id"],
+    },
+    async handler(args) {
+      await initializeReferenceData();
+      const id = requirePositiveInteger(args.id, "id");
+      return getReferee(id);
+    },
+  },
+  {
+    name: "get_venue",
+    description:
+      "Gets the full venue (stadium) record by Sportmonks venue id — id, name, city, country, capacity, surface, address, and coordinates. (A team's venue in get_team is leaner — name only; this standalone lookup returns the complete record.)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: {
+          type: "integer",
+          description: "Sportmonks venue id.",
+        },
+      },
+      required: ["id"],
+    },
+    async handler(args) {
+      await initializeReferenceData();
+      const id = requirePositiveInteger(args.id, "id");
+      return getVenue(id);
+    },
+  },
+  {
+    name: "get_rivals",
+    description:
+      "Gets a team's traditional rivals — a short list of rival clubs (e.g. Liverpool → Manchester United). Per team. Each rival has rival_team_id, rival_team_name, and rival_short_code. Coverage is partial: a team with no rival data returns an empty list (not an error).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        team_id: {
+          type: "integer",
+          description: "Sportmonks team id.",
+        },
+      },
+      required: ["team_id"],
+    },
+    async handler(args) {
+      await initializeReferenceData();
+      const teamId = requirePositiveInteger(args.team_id, "team_id");
+      return getRivals(teamId);
     },
   },
   {
@@ -2959,7 +3578,7 @@ const tools: ToolDefinition[] = [
   {
     name: "get_fixture_details",
     description:
-      "Gets detailed fixture data with optional whitelisted expansions for lineups, events, statistics, predictions, and xg. Predictions return curated match probabilities (percentages, 0-100) and value bets, and require a Sportmonks subscription with the predictions add-on. The xg include returns Expected Goals (xG) and Expected Goals on Target (xGoT) per team for finished and live fixtures; it is an empty array for upcoming fixtures or fixtures without xG coverage.",
+      "Gets detailed fixture data with optional whitelisted expansions for lineups, events, statistics, predictions, xg, referees, and tv_stations. Predictions return curated match probabilities (percentages, 0-100) and value bets, and require a Sportmonks subscription with the predictions add-on. The xg include returns Expected Goals (xG) and Expected Goals on Target (xGoT) per team for finished and live fixtures; it is an empty array for upcoming fixtures or fixtures without xG coverage. The referees include returns the match officials, each with referee_id, name, and type (role, e.g. Referee, 1st Assistant, 4th Official). The tv_stations include returns the broadcasters showing the fixture as { name, url }, deduplicated across regions; an empty array when none are listed.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2971,10 +3590,10 @@ const tools: ToolDefinition[] = [
           type: "array",
           items: {
             type: "string",
-            enum: ["lineups", "events", "statistics", "predictions", "xg"],
+            enum: ["lineups", "events", "statistics", "predictions", "xg", "referees", "tv_stations"],
           },
           description:
-            "Optional subset of ['lineups', 'events', 'statistics', 'predictions', 'xg'] to expand on top of the base fixture data.",
+            "Optional subset of ['lineups', 'events', 'statistics', 'predictions', 'xg', 'referees', 'tv_stations'] to expand on top of the base fixture data.",
         },
       },
       required: ["fixture_id"],
@@ -2985,7 +3604,7 @@ const tools: ToolDefinition[] = [
       const includes = requireEnumArray(
         args.includes,
         "includes",
-        ["lineups", "events", "statistics", "predictions", "xg"],
+        ["lineups", "events", "statistics", "predictions", "xg", "referees", "tv_stations"],
       );
       return getFixtureDetails(fixtureId, includes);
     },
@@ -3316,6 +3935,114 @@ const tools: ToolDefinition[] = [
       }
 
       return getTransfers({ id, entityType, type, timeframe, startDate, endDate });
+    },
+  },
+  {
+    name: "get_fixture_news",
+    description:
+      "Gets match news for a fixture: expert-written pre-match previews and AI-generated post-match reports. timing='prematch' (default), 'postmatch', or 'both'. Each article's lines are combined into a single ordered body (prose only, no per-line ids/types). Returns prematch/postmatch arrays matching the requested timing with a meta envelope echoing the timing and per-type counts; a fixture with no news returns empty arrays, not an error. Pre-match coverage is limited to top European competitions; post-match is broader.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        fixture_id: {
+          type: "integer",
+          description: "Sportmonks fixture id.",
+        },
+        timing: {
+          type: "string",
+          enum: ["prematch", "postmatch", "both"],
+          description:
+            "Which news to return: 'prematch' (default, richest narrative), 'postmatch', or 'both'.",
+        },
+      },
+      required: ["fixture_id"],
+    },
+    async handler(args) {
+      await initializeReferenceData();
+      const fixtureId = requirePositiveInteger(args.fixture_id, "fixture_id");
+      const timing = requireEnumValue(
+        args.timing,
+        "timing",
+        ["prematch", "postmatch", "both"],
+        "prematch",
+      );
+      return getFixtureNews(fixtureId, timing);
+    },
+  },
+  {
+    name: "get_match_facts",
+    description:
+      "Gets pre-calculated Match Facts (structured match insights) for a fixture. basis is required: 'h2h' (the head-to-head matchup between the two teams) or 'team' (each team's recent form) — request them separately, not together. Optionally filter by category (one or more of statistics, streaks, players, coaches, statistic_comparisons). The raw dataset is 400-800 facts; this tool always returns only league_matches-scoped facts with a non-null natural_language sentence, and each fact includes both that sentence and its raw data object. Capped at 100. Note: 'statistic_comparisons' exists only for basis='team'. Requires the Match Facts add-on; availability varies by league.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        fixture_id: {
+          type: "integer",
+          description: "Sportmonks fixture id.",
+        },
+        basis: {
+          type: "string",
+          enum: ["h2h", "team"],
+          description: "'h2h' for the head-to-head matchup, or 'team' for each team's recent form. Required.",
+        },
+        category: {
+          type: "array",
+          items: {
+            type: "string",
+            enum: ["statistics", "streaks", "players", "coaches", "statistic_comparisons"],
+          },
+          description:
+            "Optional category filter (one or more). 'statistic_comparisons' is only valid with basis='team'.",
+        },
+      },
+      required: ["fixture_id", "basis"],
+    },
+    async handler(args) {
+      await initializeReferenceData();
+      const fixtureId = requirePositiveInteger(args.fixture_id, "fixture_id");
+      const basis = requireEnumValue(args.basis, "basis", ["h2h", "team"]);
+      const categories = requireEnumArray(args.category, "category", MATCH_FACT_CATEGORIES);
+      return getMatchFacts(fixtureId, basis, categories);
+    },
+  },
+  {
+    name: "get_commentaries",
+    description:
+      "Gets the key moments of a fixture's text commentary — goals and cards (the is_important lines) in chronological order. A full match is ~110 commentary lines; this returns only the ~10-25 key moments. Each line has minute (stoppage time folds in as '45+9'), comment, and is_goal (true for a goal, false for a card). A fixture with no commentary returns an empty list, not an error; coverage varies by competition and many fixtures have none. Returns a { data, meta } envelope with meta = { fixture_id, returned }.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        fixture_id: {
+          type: "integer",
+          description: "Sportmonks fixture id.",
+        },
+      },
+      required: ["fixture_id"],
+    },
+    async handler(args) {
+      await initializeReferenceData();
+      const fixtureId = requirePositiveInteger(args.fixture_id, "fixture_id");
+      return getCommentaries(fixtureId);
+    },
+  },
+  {
+    name: "get_totw",
+    description:
+      "Gets the latest Team of the Week for a league — the 11 highest-rated players of the most recently completed round, by Sportmonks' player-rating model (best per positional role, max 3 per team, in the formation with the highest combined rating). Players are sorted by formation_position (goalkeeper first); each has player_name, team_name, team_short_code, a readable position, and rating. The formation and the round summary are surfaced once at the top level. Returns { league_id, round, formation, players, meta } with meta = { returned, scope, league_id, round_id }. Requires the Team of the Week add-on; coverage is round-based competitions only (no knockouts), so a league with no TOTW returns an empty players list (returned 0), not an error.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        league_id: {
+          type: "integer",
+          description: "Sportmonks league id.",
+        },
+      },
+      required: ["league_id"],
+    },
+    async handler(args) {
+      await initializeReferenceData();
+      const leagueId = requirePositiveInteger(args.league_id, "league_id");
+      return getTotw(leagueId);
     },
   },
 ];
